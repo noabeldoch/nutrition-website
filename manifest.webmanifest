@@ -1,9 +1,1 @@
-{
-  "name": "Nutrition Coach",
-  "short_name": "Nutrition",
-  "start_url": "/",
-  "display": "standalone",
-  "background_color": "#f7f5f0",
-  "theme_color": "#f7f5f0",
-  "icons": []
-}
+{"name":"התזונאית שלי","short_name":"התזונאית שלי","start_url":"/","display":"standalone","background_color":"#f7f5f0","theme_color":"#f7f5f0","lang":"he","dir":"rtl","icons":[]}

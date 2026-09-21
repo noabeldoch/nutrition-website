@@ -1,25 +1,38 @@
-# Nutrition Coach — first working web MVP
+# התזונאית שלי — Nutrition Coach Hebrew MVP
 
-## Run locally
-1. Install Node.js.
-2. In this folder run:
-   `npm install`
-3. Run:
-   `npm run dev`
-4. Open the local URL shown by Vite.
+גרסה עובדת של האתר, בעברית וב־RTL, עם מערכת Food → Recipe → Portion → Diary.
 
-## What works now
-- Mobile-first nutrition dashboard
-- Today / Meal Plan / Log / Progress / Settings navigation
-- Meal logging
-- Weight entry saved in browser localStorage
-- Food-photo selection/camera input
-- PWA manifest
-- Responsive iPhone-style UI
+## מה כבר עובד
+- ממשק מלא בעברית ו־RTL.
+- חיפוש מזונות מתוך מאגר דמו ישראלי מובנה.
+- הוספת מזון ליומן לפי גרמים.
+- יצירת מתכון עם מרכיבים וכמויות.
+- חישוב קלוריות, חלבון, פחמימות ושומן לכל המתכון.
+- הזנת משקל סופי אחרי בישול.
+- חישוב אוטומטי של ערכים ל־100 גרם.
+- הוספת חלק מהמתכון ליומן לפי גרמים.
+- שמירת מתכונים, יומן ומשקל ב־localStorage כדי שהאתר יעבוד מיד בלי שרת.
+- צילום אוכל מהמכשיר כבסיס לחיבור AI עתידי.
 
-## Next development steps
-1. Import the actual dietitian PDF into the app.
-2. Replace prompts with proper forms.
-3. Add a real database/user account.
-4. Add AI food-photo analysis.
-5. Add AI analysis of adherence and weight trends.
+## הרצת הפרויקט
+```bash
+npm install
+npm run dev
+```
+
+לבניית production:
+```bash
+npm run build
+```
+
+## חשוב לגבי מאגר המזון הישראלי
+המאגר המובנה כרגע הוא נתוני דמו כדי שהאתר יעבוד מיד. השלב הבא הוא לייבא את קובץ הנתונים הרשמי של משרד הבריאות ל־PostgreSQL/Supabase ולחבר את החיפוש אליו. אין להעתיק נתוני מקור לא ידועים או להסתמך על ערכי הדמו כמאגר רפואי/תזונתי רשמי.
+
+## ארכיטקטורת production מתוכננת
+- Frontend: React + Vite + Vercel
+- Database: PostgreSQL / Supabase
+- `foods`: מזונות ממקורות חיצוניים
+- `recipes`: מתכוני משתמש
+- `recipe_ingredients`: מרכיבי מתכון
+- `diary_entries`: רישומי אכילה עם snapshot של הערכים בזמן ההוספה
+- בהמשך: branded foods, barcode, auth, AI image analysis
