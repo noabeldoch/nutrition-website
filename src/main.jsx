@@ -39,7 +39,7 @@ function offProductToFood(p){
     name_en:p.product_name || null,
     brands:(p.brands || '').trim(),
     display_name:[(p.product_name_he || p.product_name || '').trim(),(p.brands || '').trim()].filter(Boolean).join(' — '),
-    image_url:p.image_url || p.image_front_url || p.image_small_url || null,
+    image_url:p.image_url || (p.code ? `https://images.openfoodfacts.org/images/products/${String(p.code).padStart(13,'0').replace(/(\d{3})(?=\d)/g,'$1/')}/front_en.400.jpg` : null),
     kcal, protein, carbs, fat,
     fiber:Number(n.fiber_100g ?? 0),
     sugar:Number(n.sugars_100g ?? 0),
