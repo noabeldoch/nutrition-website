@@ -47,13 +47,10 @@ function offProductToFood(p){
 
 async function searchFoodApi(q){
   // Search-a-licious is Open Food Facts' current full-text search service.
-  const response=await fetch('https://search.openfoodfacts.org/search',{
+  const response=await fetch('/api/search-food',{
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({
-      q, page:1, page_size:20, langs:['he','en'],
-      fields:['code','product_name','product_name_he','brands','nutriments']
-    })
+    body:JSON.stringify({q})
   });
   if(!response.ok) throw new Error('Food API returned '+response.status);
   const data=await response.json();
