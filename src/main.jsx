@@ -32,7 +32,7 @@ function offProductToFood(p){
   const protein=Number(n.proteins_100g ?? 0);
   const carbs=Number(n.carbohydrates_100g ?? 0);
   const fat=Number(n.fat_100g ?? 0);
-  if(!p.code || !p.product_name || ![kcal,protein,carbs,fat].some(Number.isFinite)) return null;
+  if(!p.code || !(p.product_name_he || p.product_name) || ![kcal,protein,carbs,fat].some(Number.isFinite)) return null;
   return {
     id:null, source:'openfoodfacts', source_id:String(p.code),
     name:(p.product_name_he || p.product_name || '').trim(),
