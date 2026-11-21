@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { supabase, supabaseConfigured } from './lib/supabase';
 import './styles.css';
+import { localDb, readLocalSnapshot, cacheSnapshot, queueOperation, pendingOperations, markOperationSynced, markOperationFailed } from './lib/local-db';
 
 const DEMO_FOODS = [
   { id:'demo-egg', name:'ביצה', unit:'גרם', kcal:143, protein:12.6, carbs:0.7, fat:9.5 },
@@ -104,9 +105,60 @@ function App(){
   const [dbError,setDbError]=useState('');
   const today=todayKey();
 
+  async function syncQueuedOperations(){
+    if(!supabase || !user || !navigator.onLine) return;
+    const operations=await pendingOperations();
+    for(const operation of operations){
+      try{
+        const p=operation.payload;
+        if(operation.type==='diary'){
+          const foodId=p.foodId || (p.food ? await ensureFoodRow(p.food) : null);
+          const {error}=await supabase.from('diary_entries').upsert({
+            id:p.id,user_id:user.id,eaten_at:p.eaten_at,food_id:foodId,recipe_id:p.recipeId||null,
+            quantity_g:p.grams,calories:p.kcal,protein_g:p.protein,carbs_g:p.carbs,fat_g:p.fat
+          },{onConflict:'id'});
+          if(error) throw error;
+        }else if(operation.type==='weight'){
+          const {error}=await supabase.from('weight_entries').upsert({
+            id:p.id,user_id:user.id,measured_at:p.measured_at,weight_kg:p.weight_kg
+          },{onConflict:'id'});
+          if(error) throw error;
+        }else if(operation.type==='recipe'){
+          const {error}=await supabase.from('recipes').upsert({
+            id:p.id,user_id:user.id,name:p.name,final_weight_g:p.finalWeight
+          },{onConflict:'id'});
+          if(error) throw error;
+          const rows=[];
+          for(const i of p.ingredients){
+            const foodId=i.food.id?.startsWith('demo-')?await seedDemoFood(i.food):i.food.id||await ensureFoodRow(i.food);
+            rows.push({id:i.id,recipe_id:p.id,food_id:foodId,quantity_g:i.grams});
+          }
+          const {error:ingredientError}=await supabase.from('recipe_ingredients').upsert(rows,{onConflict:'id'});
+          if(ingredientError) throw ingredientError;
+        }
+        await markOperationSynced(operation.seq);
+      }catch(e){
+        console.warn('Offline sync will retry later',e);
+        await markOperationFailed(operation.seq,(operation.attempts||0)+1);
+        break;
+      }
+    }
+  }
+
   useEffect(()=>{
     let mounted=true;
     (async()=>{
+      try{
+        const cached=await readLocalSnapshot();
+        if(!mounted)return;
+        if(cached.foods.length)setFoods(cached.foods);
+        if(cached.recipes.length)setRecipes(cached.recipes);
+        if(cached.diary.length)setDiary(cached.diary.filter(e=>(e.eaten_at||'').slice(0,10)===today));
+        if(cached.weights.length){
+          setWeightHistory(cached.weights);
+          setWeight(cached.weights[0].weight_kg?.toString()||'');
+        }
+      }catch(e){console.warn('Could not read local cache',e)}
       try{
         const session=await getSession();
         if(!mounted)return;
@@ -119,16 +171,19 @@ function App(){
             supabase.from('weight_entries').select('id,measured_at,weight_kg').order('measured_at',{ascending:false}).limit(100)
           ]);
           for(const r of [foodsRes,recipesRes,diaryRes,weightRes]) if(r.error) throw r.error;
-          if(foodsRes.data?.length){
-            setFoods(foodsRes.data.map(f=>({id:f.id,name:f.name_he,name_en:f.name_en,kcal:Number(f.kcal_per_100g),protein:Number(f.protein_per_100g),carbs:Number(f.carbs_per_100g),fat:Number(f.fat_per_100g)})));
-          }
-          setRecipes((recipesRes.data||[]).map(r=>({
+          const mappedFoods=(foodsRes.data||[]).map(f=>({id:f.id,name:f.name_he,name_en:f.name_en,kcal:Number(f.kcal_per_100g),protein:Number(f.protein_per_100g),carbs:Number(f.carbs_per_100g),fat:Number(f.fat_per_100g)}));
+          const mappedRecipes=(recipesRes.data||[]).map(r=>({
             id:r.id,name:r.name,finalWeight:Number(r.final_weight_g),
             ingredients:(r.recipe_ingredients||[]).map(i=>({id:i.id,grams:Number(i.quantity_g),food:i.foods?{id:i.foods.id,name:i.foods.name_he,kcal:Number(i.foods.kcal_per_100g),protein:Number(i.foods.protein_per_100g),carbs:Number(i.foods.carbs_per_100g),fat:Number(i.foods.fat_per_100g)}:null})).filter(i=>i.food)
-          })));
-          setDiary(diaryRes.data||[]);
-          setWeightHistory(weightRes.data||[]);
-          setWeight(weightRes.data?.[0]?.weight_kg?.toString()||'');
+          }));
+          const mappedDiary=diaryRes.data||[];
+          const mappedWeights=weightRes.data||[];
+          if(mappedFoods.length)setFoods(mappedFoods);
+          setRecipes(mappedRecipes);
+          setDiary(mappedDiary);
+          setWeightHistory(mappedWeights);
+          setWeight(mappedWeights[0]?.weight_kg?.toString()||'');
+          await cacheSnapshot({foods:mappedFoods,recipes:mappedRecipes,diary:mappedDiary,weights:mappedWeights});
         }
       }catch(e){
         console.error(e);
@@ -138,53 +193,65 @@ function App(){
     return()=>{mounted=false};
   },[]);
 
+  useEffect(()=>{
+    if(!user || !supabase) return;
+    const sync=()=>syncQueuedOperations();
+    window.addEventListener('online',sync);
+    document.addEventListener('visibilitychange',sync);
+    sync();
+    return()=>{
+      window.removeEventListener('online',sync);
+      document.removeEventListener('visibilitychange',sync);
+    };
+  },[user]);
+
   function notify(t){setToast(t);setTimeout(()=>setToast(''),2500)}
 
   async function addDiary(entry){
+    const localEntry={
+      id:crypto.randomUUID(),eaten_at:new Date().toISOString(),quantity_g:entry.grams,
+      calories:entry.kcal,protein_g:entry.protein,carbs_g:entry.carbs,fat_g:entry.fat,
+      food_id:entry.foodId||null,recipe_id:entry.recipeId||null,
+      foods:{name_he:entry.name},name:entry.name
+    };
     try{
-      if(supabase && user){
-        const foodId=entry.foodId || await ensureFoodRow(entry.food);
-        const {data,error}=await supabase.from('diary_entries').insert({
-          user_id:user.id,eaten_at:new Date().toISOString(),food_id:foodId,recipe_id:entry.recipeId||null,
-          quantity_g:entry.grams,calories:entry.kcal,protein_g:entry.protein,carbs_g:entry.carbs,fat_g:entry.fat
-        }).select('id,eaten_at,quantity_g,calories,protein_g,carbs_g,fat_g,food_id,recipe_id,foods(name_he)').single();
-        if(error)throw error;
-        setDiary(d=>[data,...d]);
-      }else{
-        setDiary(d=>[{id:crypto.randomUUID(),...entry,calories:entry.kcal,protein_g:entry.protein,carbs_g:entry.carbs,fat_g:entry.fat},...d]);
-      }
+      await localDb.diary.put(localEntry);
+      if(entry.food) await localDb.foods.put(entry.food);
+      await queueOperation('diary',{...entry,id:localEntry.id,eaten_at:localEntry.eaten_at});
+      setDiary(d=>[localEntry,...d]);
+      if(supabase && user && navigator.onLine) await syncQueuedOperations();
       notify('נוסף ליומן ✓');
-    }catch(e){console.error(e);notify('לא הצלחתי לשמור את המזון');}
+    }catch(e){console.error(e);notify('נשמר מקומית — הסנכרון ינסה שוב');}
   }
 
   async function saveWeight(){
     const value=Number(weight);
     if(!value)return;
+    const row={id:crypto.randomUUID(),weight_kg:value,measured_at:new Date().toISOString()};
     try{
-      if(supabase && user){
-        const {data,error}=await supabase.from('weight_entries').insert({user_id:user.id,weight_kg:value}).select().single();
-        if(error)throw error;
-        setWeightHistory(h=>[data,...h]);
-      }else setWeightHistory(h=>[{id:crypto.randomUUID(),weight_kg:value,measured_at:new Date().toISOString()},...h]);
+      await localDb.weights.put(row);
+      await queueOperation('weight',row);
+      setWeightHistory(h=>[row,...h]);
+      if(supabase && user && navigator.onLine) await syncQueuedOperations();
       notify('המשקל נשמר ✓');
     }catch(e){console.error(e);notify('לא הצלחתי לשמור את המשקל');}
   }
 
   async function saveRecipe(recipe){
+    const localRecipe={
+      ...recipe,id:crypto.randomUUID(),
+      ingredients:recipe.ingredients.map(i=>({...i,id:crypto.randomUUID()}))
+    };
     try{
-      if(supabase && user){
-        const {data,error}=await supabase.from('recipes').insert({user_id:user.id,name:recipe.name,final_weight_g:recipe.finalWeight}).select().single();
-        if(error)throw error;
-        const rows=[];
-        for(const i of recipe.ingredients){
-          const foodId=i.food.id?.startsWith('demo-')?await seedDemoFood(i.food):i.food.id||await ensureFoodRow(i.food);
-          rows.push({recipe_id:data.id,food_id:foodId,quantity_g:i.grams});
-        }
-        const {error:ingredientError}=await supabase.from('recipe_ingredients').insert(rows);
-        if(ingredientError)throw ingredientError;
-        setRecipes(r=>[{...recipe,id:data.id},...r]);
-      }else setRecipes(r=>[{...recipe,id:crypto.randomUUID()},...r]);
-      setShowRecipe(false);notify('המתכון נשמר ✓');
+      await localDb.recipes.put(localRecipe);
+      await localDb.transaction('rw',localDb.foods,async()=>{
+        for(const i of localRecipe.ingredients) await localDb.foods.put(i.food);
+      });
+      await queueOperation('recipe',localRecipe);
+      setRecipes(r=>[localRecipe,...r]);
+      setShowRecipe(false);
+      if(supabase && user && navigator.onLine) await syncQueuedOperations();
+      notify('המתכון נשמר ✓');
     }catch(e){console.error(e);notify('לא הצלחתי לשמור את המתכון');}
   }
 
