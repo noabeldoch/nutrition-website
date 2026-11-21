@@ -112,7 +112,7 @@ function App(){
       try{
         const p=operation.payload;
         if(operation.type==='diary'){
-          const foodId=p.foodId || (p.food ? await ensureFoodRow(p.food) : null);
+          const foodId=p.foodId?.startsWith('demo-') ? await seedDemoFood(p.food) : p.foodId || (p.food ? await ensureFoodRow(p.food) : null);
           const {error}=await supabase.from('diary_entries').upsert({
             id:p.id,user_id:user.id,eaten_at:p.eaten_at,food_id:foodId,recipe_id:p.recipeId||null,
             quantity_g:p.grams,calories:p.kcal,protein_g:p.protein,carbs_g:p.carbs,fat_g:p.fat
@@ -151,7 +151,7 @@ function App(){
       try{
         const cached=await readLocalSnapshot();
         if(!mounted)return;
-        if(cached.foods.length)setFoods(cached.foods);
+        if(cached.foods.length)setFoods([...DEMO_FOODS,...cached.foods.filter(f=>!DEMO_FOODS.some(d=>d.id===f.id))]);
         if(cached.recipes.length)setRecipes(cached.recipes);
         if(cached.diary.length)setDiary(cached.diary.filter(e=>(e.eaten_at||'').slice(0,10)===today));
         if(cached.weights.length){
@@ -178,7 +178,7 @@ function App(){
           }));
           const mappedDiary=diaryRes.data||[];
           const mappedWeights=weightRes.data||[];
-          if(mappedFoods.length)setFoods(mappedFoods);
+          if(mappedFoods.length)setFoods([...DEMO_FOODS,...mappedFoods.filter(f=>!DEMO_FOODS.some(d=>d.id===f.id))]);
           setRecipes(mappedRecipes);
           setDiary(mappedDiary);
           setWeightHistory(mappedWeights);
