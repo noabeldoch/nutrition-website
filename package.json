@@ -15,5 +15,7 @@
     "react": "latest",
     "react-dom": "latest"
   },
-  "devDependencies": {}
+  "devDependencies": {
+    "vite-plugin-pwa": "^1.2.0"
+  }
 }
