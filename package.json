@@ -13,7 +13,8 @@
     "@vitejs/plugin-react": "latest",
     "vite": "latest",
     "react": "latest",
-    "react-dom": "latest"
+    "react-dom": "latest",
+    "dexie": "^4.2.1"
   },
   "devDependencies": {
     "vite-plugin-pwa": "^1.2.0"
