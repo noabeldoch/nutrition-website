@@ -23,7 +23,8 @@ const DEMO_FOODS = [
 const nutrientKeys=['kcal','protein','carbs','fat'];
 const emptyNutrition=()=>({kcal:0,protein:0,carbs:0,fat:0});
 const round=n=>Math.round((Number(n)||0)*10)/10;
-const todayKey=()=>new Date().toISOString().slice(0,10);
+const todayKey=(date=new Date())=>{const y=date.getFullYear();const m=String(date.getMonth()+1).padStart(2,'0');const d=String(date.getDate()).padStart(2,'0');return `${y}-${m}-${d}`};
+const entryDateKey=value=>{const date=new Date(value);return Number.isNaN(date.getTime())?'':todayKey(date)};
 const calcIngredient=(food,g)=>{const f=Number(g)/100;return {kcal:food.kcal*f,protein:food.protein*f,carbs:food.carbs*f,fat:food.fat*f}};
 const calcRecipe=recipe=>recipe.ingredients.reduce((a,i)=>{const n=calcIngredient(i.food,i.grams);nutrientKeys.forEach(k=>a[k]+=n[k]);return a},emptyNutrition());
 
@@ -153,7 +154,7 @@ function App(){
         if(!mounted)return;
         if(cached.foods.length)setFoods([...DEMO_FOODS,...cached.foods.filter(f=>!DEMO_FOODS.some(d=>d.id===f.id))]);
         if(cached.recipes.length)setRecipes(cached.recipes);
-        if(cached.diary.length)setDiary(cached.diary.filter(e=>(e.eaten_at||'').slice(0,10)===today));
+        if(cached.diary.length)setDiary(cached.diary.filter(e=>entryDateKey(e.eaten_at)===today));
         if(cached.weights.length){
           setWeightHistory(cached.weights);
           setWeight(cached.weights[0].weight_kg?.toString()||'');
@@ -303,7 +304,7 @@ function Diary({entries}){return <main><div className="intro"><span className="m
 
 function Progress({weight,history}){return <main><div className="intro"><span className="muted">התקדמות</span><h2>ההתקדמות שלי</h2><p>המשקלים נשמרים עכשיו במסד הנתונים שלך.</p></div><div className="card progress-card"><span className="muted">משקל אחרון</span><strong>{weight?weight+' ק״ג':'—'}</strong><div className="fake-chart">{history.slice(0,6).reverse().map((x,i)=><i style={{height:Math.max(20,Math.min(100,Number(x.weight_kg)||20))+'%'}} key={i}/>)}</div></div></main>}
 
-function Settings({connected}){return <main><div className="intro"><span className="muted">הגדרות</span><h2>הגדרות</h2><p>{connected?'הנתונים שלך נשמרים ב-Supabase.':'מצב מקומי — הגדירי Supabase כדי לסנכרן נתונים.'}</p></div>{['יעד קלורי','יעד חלבון','משקל יעד','התראות'].map(x=><div className="setting card" key={x}><span>{x}</span><b>›</b></div>)}</main>}
+function Settings({connected}){return <main><div className="intro"><span className="muted">הגדרות</span><h2>הגדרות</h2><p>{connected?'הנתונים שלך מסונכרנים לענן.':'הנתונים נשמרים במכשיר הזה בלבד. חיפוש מזון דורש חיבור לאינטרנט.'}</p></div>{['יעד קלורי','יעד חלבון','משקל יעד','התראות'].map(x=><div className="setting card" key={x}><span>{x}</span><b>›</b></div>)}</main>}
 
 function RecipeModal({foods,onClose,onSave}){const [name,setName]=useState('');const [finalWeight,setFinalWeight]=useState('');const [ingredients,setIngredients]=useState([]);const [foodId,setFoodId]=useState(foods[0]?.id);const [grams,setGrams]=useState('100');const total=calcRecipe({ingredients});const per=finalWeight?Object.fromEntries(nutrientKeys.map(k=>[k,total[k]/Number(finalWeight)*100])):null;return <Modal title="מתכון חדש" onClose={onClose}><label>שם המתכון<input value={name} onChange={e=>setName(e.target.value)} placeholder="למשל: פשטידת קישואים"/></label><div className="ingredient-add"><select value={foodId} onChange={e=>setFoodId(e.target.value)}>{foods.map(f=><option key={f.id} value={f.id}>{f.name}</option>)}</select><input inputMode="decimal" value={grams} onChange={e=>setGrams(e.target.value)} placeholder="גרם"/><button className="secondary" onClick={()=>{const food=foods.find(f=>f.id===foodId);if(food)setIngredients([...ingredients,{food,grams:Number(grams)||0}])}}>הוסף</button></div><div className="ingredient-list">{ingredients.map((i,idx)=><div key={idx}><span>{i.food.name}</span><b>{i.grams}g</b></div>)}</div><div className="calc-box"><b>סה״כ המתכון</b><span>{round(total.kcal)} קל׳ · {round(total.protein)}g חלבון</span></div><label>משקל סופי אחרי הכנה (גרם)<input inputMode="decimal" value={finalWeight} onChange={e=>setFinalWeight(e.target.value)} placeholder="למשל 500"/></label>{per&&<div className="calc-box highlight"><b>ל־100 גרם</b><span>{round(per.kcal)} קל׳ · {round(per.protein)}g חלבון · {round(per.carbs)}g פחמימות · {round(per.fat)}g שומן</span></div>}<button className="primary full" disabled={!name||!ingredients.length||!Number(finalWeight)} onClick={()=>onSave({id:crypto.randomUUID(),name,finalWeight:Number(finalWeight),ingredients})}>שמור מתכון</button></Modal>}
 
