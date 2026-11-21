@@ -112,7 +112,7 @@ function App(){
       try{
         const p=operation.payload;
         if(operation.type==='diary'){
-          const foodId=p.foodId?.startsWith('demo-') ? await seedDemoFood(p.food) : p.foodId || (p.food ? await ensureFoodRow(p.food) : null);
+          const foodId=p.foodId?.startsWith('demo-') ? await seedDemoFood(p.food) : p.food?.source_id ? await ensureFoodRow(p.food) : p.foodId || (p.food ? await ensureFoodRow(p.food) : null);
           const {error}=await supabase.from('diary_entries').upsert({
             id:p.id,user_id:user.id,eaten_at:p.eaten_at,food_id:foodId,recipe_id:p.recipeId||null,
             quantity_g:p.grams,calories:p.kcal,protein_g:p.protein,carbs_g:p.carbs,fat_g:p.fat
@@ -130,7 +130,7 @@ function App(){
           if(error) throw error;
           const rows=[];
           for(const i of p.ingredients){
-            const foodId=i.food.id?.startsWith('demo-')?await seedDemoFood(i.food):i.food.id||await ensureFoodRow(i.food);
+            const foodId=i.food.id?.startsWith('demo-')?await seedDemoFood(i.food):i.food.source_id?await ensureFoodRow(i.food):i.food.id||await ensureFoodRow(i.food);
             rows.push({id:i.id,recipe_id:p.id,food_id:foodId,quantity_g:i.grams});
           }
           const {error:ingredientError}=await supabase.from('recipe_ingredients').upsert(rows,{onConflict:'id'});
@@ -179,11 +179,15 @@ function App(){
           const mappedDiary=diaryRes.data||[];
           const mappedWeights=weightRes.data||[];
           if(mappedFoods.length)setFoods([...DEMO_FOODS,...mappedFoods.filter(f=>!DEMO_FOODS.some(d=>d.id===f.id))]);
-          setRecipes(mappedRecipes);
-          setDiary(mappedDiary);
-          setWeightHistory(mappedWeights);
-          setWeight(mappedWeights[0]?.weight_kg?.toString()||'');
-          await cacheSnapshot({foods:mappedFoods,recipes:mappedRecipes,diary:mappedDiary,weights:mappedWeights});
+          const [localAfter,queued]=await Promise.all([readLocalSnapshot(),pendingOperations()]);
+          const mergedRecipes=[...localAfter.recipes.filter(r=>queued.some(o=>o.type==='recipe'&&o.payload.id===r.id)),...mappedRecipes];
+          const mergedDiary=[...localAfter.diary.filter(e=>queued.some(o=>o.type==='diary'&&o.payload.id===e.id)),...mappedDiary];
+          const mergedWeights=[...localAfter.weights.filter(w=>queued.some(o=>o.type==='weight'&&o.payload.id===w.id)),...mappedWeights];
+          setRecipes(mergedRecipes);
+          setDiary(mergedDiary);
+          setWeightHistory(mergedWeights);
+          setWeight(mergedWeights[0]?.weight_kg?.toString()||'');
+          await cacheSnapshot({foods:[...mappedFoods,...localAfter.foods],recipes:mergedRecipes,diary:mergedDiary,weights:mergedWeights});
         }
       }catch(e){
         console.error(e);
@@ -216,7 +220,7 @@ function App(){
     };
     try{
       await localDb.diary.put(localEntry);
-      if(entry.food) await localDb.foods.put(entry.food);
+      if(entry.food) await localDb.foods.put({...entry.food,id:entry.food.id||crypto.randomUUID()});
       await queueOperation('diary',{...entry,id:localEntry.id,eaten_at:localEntry.eaten_at});
       setDiary(d=>[localEntry,...d]);
       if(supabase && user && navigator.onLine) await syncQueuedOperations();
@@ -240,7 +244,7 @@ function App(){
   async function saveRecipe(recipe){
     const localRecipe={
       ...recipe,id:crypto.randomUUID(),
-      ingredients:recipe.ingredients.map(i=>({...i,id:crypto.randomUUID()}))
+      ingredients:recipe.ingredients.map(i=>({...i,id:crypto.randomUUID(),food:{...i.food,id:i.food.id||crypto.randomUUID()}}))
     };
     try{
       await localDb.recipes.put(localRecipe);
