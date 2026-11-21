@@ -72,6 +72,7 @@ alter table public.recipe_ingredients enable row level security;
 alter table public.diary_entries enable row level security;
 alter table public.weight_entries enable row level security;
 
+grant usage on schema public to authenticated;
 grant select, insert, update on public.foods to authenticated;
 grant select, insert, update, delete on public.recipes to authenticated;
 grant select, insert, update, delete on public.recipe_ingredients to authenticated;
