@@ -106,6 +106,21 @@ function App(){
   const [dbError,setDbError]=useState('');
   const today=todayKey();
 
+  async function linkGoogleAccount(){
+    if(!supabase || !user) return;
+    if(!user.is_anonymous){ notify('החשבון כבר מקושר ✓'); return; }
+    try{
+      const {error}=await supabase.auth.linkIdentity({
+        provider:'google',
+        options:{redirectTo:window.location.origin}
+      });
+      if(error) throw error;
+    }catch(e){
+      console.error('Google account linking failed',e);
+      notify('לא הצלחתי להתחיל התחברות Google. בדקי שהספק הוגדר ב-Supabase.');
+    }
+  }
+
   async function syncQueuedOperations(){
     if(!supabase || !user || !navigator.onLine) return;
     const operations=await pendingOperations();
@@ -148,6 +163,9 @@ function App(){
 
   useEffect(()=>{
     let mounted=true;
+    const {data:authListener}=supabase?.auth.onAuthStateChange((_event,session)=>{
+      if(mounted) setUser(session?.user||null);
+    }) || {data:{subscription:null}};
     (async()=>{
       try{
         const cached=await readLocalSnapshot();
@@ -195,7 +213,7 @@ function App(){
         if(mounted)setDbError(supabaseConfigured?'לא הצלחתי להתחבר למסד הנתונים. בדקי את הגדרות Supabase.':'החיבור ל-Supabase עדיין לא הוגדר.');
       }finally{if(mounted)setLoading(false)}
     })();
-    return()=>{mounted=false};
+    return()=>{mounted=false;authListener?.subscription?.unsubscribe()};
   },[]);
 
   useEffect(()=>{
@@ -281,7 +299,7 @@ function App(){
     {tab==='מתכונים'&&<Recipes recipes={recipes} onNew={()=>setShowRecipe(true)} onLog={addDiary}/>}
     {tab==='יומן'&&<Diary entries={todayEntries}/>}
     {tab==='התקדמות'&&<Progress weight={weight} history={weightHistory}/>}
-    {tab==='הגדרות'&&<Settings connected={Boolean(user)}/>}
+    {tab==='הגדרות'&&<Settings user={user} connected={Boolean(user)} onLinkGoogle={linkGoogleAccount}/>}
     {showRecipe&&<RecipeModal foods={foods} onClose={()=>setShowRecipe(false)} onSave={saveRecipe}/>}
     {showFood&&<FoodModal foods={foods} recipes={recipes} onClose={()=>setShowFood(false)} onAdd={e=>{addDiary(e);setShowFood(false)}}/>}
     {toast&&<div className="toast">{toast}</div>}
@@ -304,7 +322,7 @@ function Diary({entries}){return <main><div className="intro"><span className="m
 
 function Progress({weight,history}){return <main><div className="intro"><span className="muted">התקדמות</span><h2>ההתקדמות שלי</h2><p>המשקלים נשמרים עכשיו במסד הנתונים שלך.</p></div><div className="card progress-card"><span className="muted">משקל אחרון</span><strong>{weight?weight+' ק״ג':'—'}</strong><div className="fake-chart">{history.slice(0,6).reverse().map((x,i)=><i style={{height:Math.max(20,Math.min(100,Number(x.weight_kg)||20))+'%'}} key={i}/>)}</div></div></main>}
 
-function Settings({connected}){return <main><div className="intro"><span className="muted">הגדרות</span><h2>הגדרות</h2><p>{connected?'הנתונים שלך מסונכרנים לענן.':'הנתונים נשמרים במכשיר הזה בלבד. חיפוש מזון דורש חיבור לאינטרנט.'}</p></div>{['יעד קלורי','יעד חלבון','משקל יעד','התראות'].map(x=><div className="setting card" key={x}><span>{x}</span><b>›</b></div>)}</main>}
+function Settings({connected,user,onLinkGoogle}){const linked=Boolean(user&&!user.is_anonymous);return <main><div className="intro"><span className="muted">הגדרות</span><h2>הגדרות</h2><p>{connected?'הנתונים שלך מסונכרנים לענן.':'הנתונים נשמרים במכשיר הזה בלבד. חיפוש מזון דורש חיבור לאינטרנט.'}</p></div><section className="card" style={{padding:16,marginBottom:12}}><strong>גיבוי ושחזור</strong><p className="muted">{linked?'החשבון שלך מקושר וניתן לשחזר את הנתונים באמצעות Google.':connected?'הנתונים מסונכרנים לענן, אך עדיין משויכים למשתמש אנונימי במכשיר הזה.':'התחברי כדי לגבות ולשחזר נתונים בין מכשירים.'}</p>{connected&&!linked&&<button className="primary full" onClick={onLinkGoogle}>התחברות וקישור באמצעות Google</button>}{linked&&<div className="muted">✓ חשבון Google מקושר</div>}</section>{['יעד קלורי','יעד חלבון','משקל יעד','התראות'].map(x=><div className="setting card" key={x}><span>{x}</span><b>›</b></div>)}</main>}
 
 function RecipeModal({foods,onClose,onSave}){const [name,setName]=useState('');const [finalWeight,setFinalWeight]=useState('');const [ingredients,setIngredients]=useState([]);const [foodId,setFoodId]=useState(foods[0]?.id);const [grams,setGrams]=useState('100');const total=calcRecipe({ingredients});const per=finalWeight?Object.fromEntries(nutrientKeys.map(k=>[k,total[k]/Number(finalWeight)*100])):null;return <Modal title="מתכון חדש" onClose={onClose}><label>שם המתכון<input value={name} onChange={e=>setName(e.target.value)} placeholder="למשל: פשטידת קישואים"/></label><div className="ingredient-add"><select value={foodId} onChange={e=>setFoodId(e.target.value)}>{foods.map(f=><option key={f.id} value={f.id}>{f.name}</option>)}</select><input inputMode="decimal" value={grams} onChange={e=>setGrams(e.target.value)} placeholder="גרם"/><button className="secondary" onClick={()=>{const food=foods.find(f=>f.id===foodId);if(food)setIngredients([...ingredients,{food,grams:Number(grams)||0}])}}>הוסף</button></div><div className="ingredient-list">{ingredients.map((i,idx)=><div key={idx}><span>{i.food.name}</span><b>{i.grams}g</b></div>)}</div><div className="calc-box"><b>סה״כ המתכון</b><span>{round(total.kcal)} קל׳ · {round(total.protein)}g חלבון</span></div><label>משקל סופי אחרי הכנה (גרם)<input inputMode="decimal" value={finalWeight} onChange={e=>setFinalWeight(e.target.value)} placeholder="למשל 500"/></label>{per&&<div className="calc-box highlight"><b>ל־100 גרם</b><span>{round(per.kcal)} קל׳ · {round(per.protein)}g חלבון · {round(per.carbs)}g פחמימות · {round(per.fat)}g שומן</span></div>}<button className="primary full" disabled={!name||!ingredients.length||!Number(finalWeight)} onClick={()=>onSave({id:crypto.randomUUID(),name,finalWeight:Number(finalWeight),ingredients})}>שמור מתכון</button></Modal>}
 
