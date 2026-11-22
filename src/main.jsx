@@ -118,7 +118,10 @@ function App(){
         return;
       }
       if(!session.user.is_anonymous){ notify('חשבון Google כבר מקושר ✓'); return; }
-      const {error}=await supabase.auth.linkIdentity({
+      // This PWA may have a fresh anonymous user while Google is already
+      // linked to the user's existing account in Safari. Sign in to that
+      // existing Google account so its cloud data becomes available here.
+      const {error}=await supabase.auth.signInWithOAuth({
         provider:'google',
         options:{redirectTo:window.location.origin}
       });
