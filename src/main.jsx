@@ -222,7 +222,7 @@ function App(){
     try{
       await localDb.diary.put(localEntry);
       if(entry.food) await localDb.foods.put({...entry.food,id:entry.food.id||crypto.randomUUID()});
-      await queueOperation('diary',{...entry,id:localEntry.id,eaten_at:localEntry.eaten_at});
+      await queueOperation('diary',{...entry,id:localEntry.id,eaten_at:localEntry.eaten_at,user_id:user?.id||null});
       setDiary(d=>[localEntry,...d]);
       if(supabase && user && navigator.onLine) await syncQueuedOperations();
       notify('נוסף ליומן ✓');
@@ -235,7 +235,7 @@ function App(){
     const row={id:crypto.randomUUID(),weight_kg:value,measured_at:new Date().toISOString()};
     try{
       await localDb.weights.put(row);
-      await queueOperation('weight',row);
+      await queueOperation('weight',{...row,user_id:user?.id||null});
       setWeightHistory(h=>[row,...h]);
       if(supabase && user && navigator.onLine) await syncQueuedOperations();
       notify('המשקל נשמר ✓');
@@ -252,7 +252,7 @@ function App(){
       await localDb.transaction('rw',localDb.foods,async()=>{
         for(const i of localRecipe.ingredients) await localDb.foods.put(i.food);
       });
-      await queueOperation('recipe',localRecipe);
+      await queueOperation('recipe',{...localRecipe,user_id:user?.id||null});
       setRecipes(r=>[localRecipe,...r]);
       setShowRecipe(false);
       if(supabase && user && navigator.onLine) await syncQueuedOperations();
