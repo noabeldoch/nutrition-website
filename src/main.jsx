@@ -99,6 +99,7 @@ function App(){
   const [weight,setWeight]=useState('');
   const [weightHistory,setWeightHistory]=useState([]);
   const [goals,setGoals]=useState(()=>{try{return JSON.parse(localStorage.getItem('nutrition-goals'))||{calories:1800,protein:100,targetWeight:''}}catch{return {calories:1800,protein:100,targetWeight:''}}});
+  const [selectedDiaryDate,setSelectedDiaryDate]=useState(todayKey());
   const [showRecipe,setShowRecipe]=useState(false);
   const [showFood,setShowFood]=useState(false);
   const [toast,setToast]=useState('');
@@ -149,6 +150,12 @@ function App(){
             quantity_g:p.grams,calories:p.kcal,protein_g:p.protein,carbs_g:p.carbs,fat_g:p.fat
           },{onConflict:'id'});
           if(error) throw error;
+        }else if(operation.type==='diary_update'){
+          const {error}=await supabase.from('diary_entries').update({eaten_at:p.eaten_at,quantity_g:p.grams,calories:p.kcal,protein_g:p.protein,carbs_g:p.carbs,fat_g:p.fat}).eq('id',p.id);
+          if(error) throw error;
+        }else if(operation.type==='diary_delete'){
+          const {error}=await supabase.from('diary_entries').delete().eq('id',p.id);
+          if(error) throw error;
         }else if(operation.type==='weight'){
           const {error}=await supabase.from('weight_entries').upsert({
             id:p.id,user_id:user.id,measured_at:p.measured_at,weight_kg:p.weight_kg
@@ -187,7 +194,7 @@ function App(){
         if(!mounted)return;
         if(cached.foods.length)setFoods([...DEMO_FOODS,...cached.foods.filter(f=>!DEMO_FOODS.some(d=>d.id===f.id))]);
         if(cached.recipes.length)setRecipes(cached.recipes);
-        if(cached.diary.length)setDiary(cached.diary.filter(e=>entryDateKey(e.eaten_at)===today));
+        if(cached.diary.length)setDiary(cached.diary);
         if(cached.weights.length){
           setWeightHistory(cached.weights);
           setWeight(cached.weights[0].weight_kg?.toString()||'');
@@ -201,7 +208,7 @@ function App(){
           const [foodsRes,recipesRes,diaryRes,weightRes,preferencesRes]=await Promise.all([
             supabase.from('foods').select('*').order('name_he').limit(200),
             supabase.from('recipes').select('id,name,final_weight_g,recipe_ingredients(id,quantity_g,food_id,foods(*))').order('created_at',{ascending:false}),
-            supabase.from('diary_entries').select('id,eaten_at,quantity_g,calories,protein_g,carbs_g,fat_g,food_id,recipe_id,foods(name_he)').gte('eaten_at',today+'T00:00:00').order('eaten_at',{ascending:false}),
+            supabase.from('diary_entries').select('id,eaten_at,quantity_g,calories,protein_g,carbs_g,fat_g,food_id,recipe_id,foods(name_he)').order('eaten_at',{ascending:false}).limit(500),
             supabase.from('weight_entries').select('id,measured_at,weight_kg').order('measured_at',{ascending:false}).limit(100),
             supabase.from('user_preferences').select('calorie_goal,protein_goal_g,target_weight_kg').eq('user_id',session.user.id).maybeSingle()
           ]);
@@ -272,6 +279,35 @@ function App(){
     }catch(e){console.error(e);notify('נשמר מקומית — הסנכרון ינסה שוב');}
   }
 
+  async function updateDiaryEntry(entryId,nextGrams){
+    const grams=Number(nextGrams);
+    const current=diary.find(e=>e.id===entryId);
+    if(!current||!Number.isFinite(grams)||grams<=0){notify('יש להזין כמות תקינה');return;}
+    const oldGrams=Number(current.quantity_g||current.grams||0);
+    if(oldGrams<=0)return;
+    const factor=grams/oldGrams;
+    const updated={...current,quantity_g:grams,calories:round(Number(current.calories??current.kcal||0)*factor),protein_g:round(Number(current.protein_g??current.protein||0)*factor),carbs_g:round(Number(current.carbs_g??current.carbs||0)*factor),fat_g:round(Number(current.fat_g??current.fat||0)*factor)};
+    try{
+      await localDb.diary.put(updated);
+      await queueOperation('diary_update',{id:updated.id,eaten_at:updated.eaten_at,grams:updated.quantity_g,kcal:updated.calories,protein:updated.protein_g,carbs:updated.carbs_g,fat:updated.fat_g,user_id:user?.id||null});
+      setDiary(items=>items.map(e=>e.id===entryId?updated:e));
+      if(supabase&&user&&navigator.onLine) await syncQueuedOperations();
+      notify('הרישום עודכן ✓');
+    }catch(e){console.error(e);notify('השינוי נשמר מקומית ויסתנכרן בהמשך');}
+  }
+
+  async function deleteDiaryEntry(entryId){
+    const current=diary.find(e=>e.id===entryId);
+    if(!current)return;
+    try{
+      await localDb.diary.delete(entryId);
+      await queueOperation('diary_delete',{id:entryId,user_id:user?.id||null});
+      setDiary(items=>items.filter(e=>e.id!==entryId));
+      if(supabase&&user&&navigator.onLine) await syncQueuedOperations();
+      notify('הרישום נמחק');
+    }catch(e){console.error(e);notify('לא הצלחתי למחוק את הרישום');}
+  }
+
   async function saveWeight(){
     const value=Number(weight);
     if(!value)return;
@@ -313,7 +349,7 @@ function App(){
     return data.id;
   }
 
-  const todayEntries=diary;
+  const todayEntries=diary.filter(e=>entryDateKey(e.eaten_at)===today);
   const totals=useMemo(()=>todayEntries.reduce((a,e)=>{a.kcal+=Number(e.calories||e.kcal||0);a.protein+=Number(e.protein_g||e.protein||0);a.carbs+=Number(e.carbs_g||e.carbs||0);a.fat+=Number(e.fat_g||e.fat||0);return a},emptyNutrition()),[todayEntries]);
 
   return <div className="app">
@@ -322,7 +358,7 @@ function App(){
     {loading&&<div className="card" style={{margin:'0 16px 12px',padding:'12px'}}>מתחברת לנתונים…</div>}
     {tab==='היום'&&<Today goals={goals} totals={totals} entries={todayEntries} onAdd={()=>setShowFood(true)} onRecipe={()=>setShowRecipe(true)} weight={weight} setWeight={setWeight} saveWeight={saveWeight} photo={photo} addPhoto={e=>{const f=e.target.files?.[0];if(f){setPhoto(URL.createObjectURL(f));notify('התמונה נוספה')}}}/>}
     {tab==='מתכונים'&&<Recipes recipes={recipes} onNew={()=>setShowRecipe(true)} onLog={addDiary}/>}
-    {tab==='יומן'&&<Diary entries={todayEntries}/>}
+    {tab==='יומן'&&<Diary entries={diary.filter(e=>entryDateKey(e.eaten_at)===selectedDiaryDate)} selectedDate={selectedDiaryDate} onDateChange={setSelectedDiaryDate} onUpdate={updateDiaryEntry} onDelete={deleteDiaryEntry}/>}
     {tab==='התקדמות'&&<Progress weight={weight} history={weightHistory}/>}
     {tab==='הגדרות'&&<Settings user={user} connected={Boolean(user)} cloudEnabled={supabaseConfigured} goals={goals} onSaveGoals={saveGoals} onLinkGoogle={linkGoogleAccount}/ >}
     {showRecipe&&<RecipeModal foods={foods} onClose={()=>setShowRecipe(false)} onSave={saveRecipe}/>}
@@ -343,7 +379,7 @@ function Today({goals,totals,entries,onAdd,onRecipe,weight,setWeight,saveWeight,
 
 function Recipes({recipes,onNew,onLog}){return <main><div className="intro"><span className="muted">המתכונים שלי</span><h2>המתכונים שלי</h2><p>שמרי מתכון פעם אחת, ואז הוסיפי ליומן כל כמות שתרצי.</p></div><button className="primary full" onClick={onNew}>＋ יצירת מתכון חדש</button><div className="stack">{recipes.length===0?<div className="empty card">עדיין אין מתכונים. צרי את הראשון.</div>:recipes.map(r=>{const n=calcRecipe(r);const per=r.finalWeight?Object.fromEntries(nutrientKeys.map(k=>[k,n[k]/r.finalWeight*100])):n;return <div className="recipe-card card" key={r.id}><div><strong>{r.name}</strong><p>{r.ingredients.length} מרכיבים · משקל סופי {r.finalWeight} גרם</p></div><div className="nutrition-mini"><b>{round(per.kcal)} קל׳</b><span>{round(per.protein)}g חלבון ל־100g</span></div><button className="secondary" onClick={()=>onLog({name:r.name,recipeId:r.id,grams:100,kcal:per.kcal,protein:per.protein,carbs:per.carbs,fat:per.fat})}>＋ 100 גרם ליומן</button></div>})}</div></main>}
 
-function Diary({entries}){return <main><div className="intro"><span className="muted">היומן</span><h2>מה אכלתי היום</h2></div><div className="stack">{entries.length?entries.map(e=><div className="card entry" key={e.id}><div className="meal-icon">🍽️</div><div className="meal-copy"><strong>{e.foods?.name_he||e.name||'מזון'}</strong><span>{e.quantity_g||e.grams} גרם · {round(e.protein_g??e.protein)} גרם חלבון</span></div><b>{round(e.calories??e.kcal)} קל׳</b></div>):<div className="empty card">אין עדיין רישומים.</div>}</div></main>}
+function Diary({entries,selectedDate,onDateChange,onUpdate,onDelete}){const [editing,setEditing]=useState(null);const [grams,setGrams]=useState('');return <main><div className="intro"><span className="muted">היומן</span><h2>יומן אכילה</h2><label className="diary-date">בחירת תאריך<input type="date" value={selectedDate} max={todayKey()} onChange={e=>{onDateChange(e.target.value);setEditing(null)}}/></label></div><div className="stack">{entries.length?entries.map(e=><div className="card diary-entry" key={e.id}><div className="entry"><div className="meal-icon">🍽️</div><div className="meal-copy"><strong>{e.foods?.name_he||e.name||'מזון'}</strong><span>{new Date(e.eaten_at).toLocaleTimeString('he-IL',{hour:'2-digit',minute:'2-digit'})} · {e.quantity_g||e.grams} גרם · {round(e.protein_g??e.protein)} גרם חלבון</span></div><b>{round(e.calories??e.kcal)} קל׳</b></div>{editing===e.id?<div className="diary-edit"><label>כמות בגרמים<input type="number" min="1" step="1" value={grams} onChange={x=>setGrams(x.target.value)}/></label><div className="diary-actions"><button className="primary" onClick={()=>{onUpdate(e.id,grams);setEditing(null)}}>שמירה</button><button className="secondary" onClick={()=>setEditing(null)}>ביטול</button></div></div>:<div className="diary-actions"><button className="secondary" onClick={()=>{setEditing(e.id);setGrams(String(e.quantity_g||e.grams||''))}}>עריכה</button><button className="secondary" onClick={()=>{if(window.confirm('למחוק את הרישום הזה מהיומן?'))onDelete(e.id)}}>מחיקה</button></div>}</div>):<div className="empty card">אין רישומים בתאריך הזה.</div>}</div></main>}
 
 function Progress({weight,history}){return <main><div className="intro"><span className="muted">התקדמות</span><h2>ההתקדמות שלי</h2><p>המשקלים נשמרים עכשיו במסד הנתונים שלך.</p></div><div className="card progress-card"><span className="muted">משקל אחרון</span><strong>{weight?weight+' ק״ג':'—'}</strong><div className="fake-chart">{history.slice(0,6).reverse().map((x,i)=><i style={{height:Math.max(20,Math.min(100,Number(x.weight_kg)||20))+'%'}} key={i}/>)}</div></div></main>}
 
