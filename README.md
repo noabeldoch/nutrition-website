@@ -49,11 +49,12 @@ The site can be installed on iPhone as a web app, without a Mac or Apple Develop
 ### Local and cloud data
 
 - The app stores foods, recipes, diary entries, and weight history in IndexedDB on the device (via Dexie).
-- Diary, recipe, and weight changes are added to a local outbox and synced to the existing Supabase tables when online.
+- Diary, recipe, and weight changes are added to a local outbox and synced to the Supabase tables when online and a Supabase Auth session is available.
+- Cloud sync uses a per-install anonymous Supabase identity for this first version. It is not an account-recovery mechanism: clearing app/browser data or reinstalling may create a different identity, so add a permanent sign-in/linking flow before treating cloud sync as a complete backup.
 - The app retries queued writes when connectivity returns or the app becomes active.
 - The service worker precaches the app shell so the installed app can reopen offline. Food search still needs a connection; previously loaded data and offline logging remain available.
 - iOS may suspend background work. Pending changes sync when the app is opened/foregrounded or connectivity returns; background sync is not guaranteed.
-- Browser storage can be cleared by iOS or by deleting website data. Cloud sync is the backup, so open the app online periodically.
+- Browser storage can be cleared by iOS or by deleting website data. Cloud sync is intended as an additional copy, but the anonymous identity must be upgraded to a permanent sign-in before cross-device recovery is available.
 
 ### Deploying
 
