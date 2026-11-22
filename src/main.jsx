@@ -286,7 +286,7 @@ function App(){
     const oldGrams=Number(current.quantity_g||current.grams||0);
     if(oldGrams<=0)return;
     const factor=grams/oldGrams;
-    const updated={...current,quantity_g:grams,calories:round(Number(current.calories??current.kcal||0)*factor),protein_g:round(Number(current.protein_g??current.protein||0)*factor),carbs_g:round(Number(current.carbs_g??current.carbs||0)*factor),fat_g:round(Number(current.fat_g??current.fat||0)*factor)};
+    const updated={...current,quantity_g:grams,calories:round(Number((current.calories??current.kcal) || 0)*factor),protein_g:round(Number((current.protein_g??current.protein) || 0)*factor),carbs_g:round(Number((current.carbs_g??current.carbs) || 0)*factor),fat_g:round(Number((current.fat_g??current.fat) || 0)*factor)};
     try{
       await localDb.diary.put(updated);
       await queueOperation('diary_update',{id:updated.id,eaten_at:updated.eaten_at,grams:updated.quantity_g,kcal:updated.calories,protein:updated.protein_g,carbs:updated.carbs_g,fat:updated.fat_g,user_id:user?.id||null});
