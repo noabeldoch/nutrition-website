@@ -358,7 +358,7 @@ function App(){
     {loading&&<div className="card" style={{margin:'0 16px 12px',padding:'12px'}}>מתחברת לנתונים…</div>}
     {tab==='היום'&&<Today goals={goals} totals={totals} entries={todayEntries} onAdd={()=>setShowFood(true)} onRecipe={()=>setShowRecipe(true)} weight={weight} setWeight={setWeight} saveWeight={saveWeight} photo={photo} addPhoto={e=>{const f=e.target.files?.[0];if(f){setPhoto(URL.createObjectURL(f));notify('התמונה נוספה')}}}/>}
     {tab==='מתכונים'&&<Recipes recipes={recipes} onNew={()=>setShowRecipe(true)} onLog={addDiary}/>}
-    {tab==='יומן'&&<Diary entries={diary.filter(e=>entryDateKey(e.eaten_at)===selectedDiaryDate)} selectedDate={selectedDiaryDate} onDateChange={setSelectedDiaryDate} onUpdate={updateDiaryEntry} onDelete={deleteDiaryEntry}/>}
+    {tab==='יומן'&&<Diary entries={diary.filter(e=>entryDateKey(e.eaten_at)===selectedDiaryDate)} selectedDate={selectedDiaryDate} goals={goals} onDateChange={setSelectedDiaryDate} onUpdate={updateDiaryEntry} onDelete={deleteDiaryEntry}/>}
     {tab==='התקדמות'&&<Progress weight={weight} history={weightHistory}/>}
     {tab==='הגדרות'&&<Settings user={user} connected={Boolean(user)} cloudEnabled={supabaseConfigured} goals={goals} onSaveGoals={saveGoals} onLinkGoogle={linkGoogleAccount}/ >}
     {showRecipe&&<RecipeModal foods={foods} onClose={()=>setShowRecipe(false)} onSave={saveRecipe}/>}
@@ -379,7 +379,35 @@ function Today({goals,totals,entries,onAdd,onRecipe,weight,setWeight,saveWeight,
 
 function Recipes({recipes,onNew,onLog}){return <main><div className="intro"><span className="muted">המתכונים שלי</span><h2>המתכונים שלי</h2><p>שמרי מתכון פעם אחת, ואז הוסיפי ליומן כל כמות שתרצי.</p></div><button className="primary full" onClick={onNew}>＋ יצירת מתכון חדש</button><div className="stack">{recipes.length===0?<div className="empty card">עדיין אין מתכונים. צרי את הראשון.</div>:recipes.map(r=>{const n=calcRecipe(r);const per=r.finalWeight?Object.fromEntries(nutrientKeys.map(k=>[k,n[k]/r.finalWeight*100])):n;return <div className="recipe-card card" key={r.id}><div><strong>{r.name}</strong><p>{r.ingredients.length} מרכיבים · משקל סופי {r.finalWeight} גרם</p></div><div className="nutrition-mini"><b>{round(per.kcal)} קל׳</b><span>{round(per.protein)}g חלבון ל־100g</span></div><button className="secondary" onClick={()=>onLog({name:r.name,recipeId:r.id,grams:100,kcal:per.kcal,protein:per.protein,carbs:per.carbs,fat:per.fat})}>＋ 100 גרם ליומן</button></div>})}</div></main>}
 
-function Diary({entries,selectedDate,onDateChange,onUpdate,onDelete}){const [editing,setEditing]=useState(null);const [grams,setGrams]=useState('');return <main><div className="intro"><span className="muted">היומן</span><h2>יומן אכילה</h2><label className="diary-date">בחירת תאריך<input type="date" value={selectedDate} max={todayKey()} onChange={e=>{onDateChange(e.target.value);setEditing(null)}}/></label></div><div className="stack">{entries.length?entries.map(e=><div className="card diary-entry" key={e.id}><div className="entry"><div className="meal-icon">🍽️</div><div className="meal-copy"><strong>{e.foods?.name_he||e.name||'מזון'}</strong><span>{new Date(e.eaten_at).toLocaleTimeString('he-IL',{hour:'2-digit',minute:'2-digit'})} · {e.quantity_g||e.grams} גרם · {round(e.protein_g??e.protein)} גרם חלבון</span></div><b>{round(e.calories??e.kcal)} קל׳</b></div>{editing===e.id?<div className="diary-edit"><label>כמות בגרמים<input type="number" min="1" step="1" value={grams} onChange={x=>setGrams(x.target.value)}/></label><div className="diary-actions"><button className="primary" onClick={()=>{onUpdate(e.id,grams);setEditing(null)}}>שמירה</button><button className="secondary" onClick={()=>setEditing(null)}>ביטול</button></div></div>:<div className="diary-actions"><button className="secondary" onClick={()=>{setEditing(e.id);setGrams(String(e.quantity_g||e.grams||''))}}>עריכה</button><button className="secondary" onClick={()=>{if(window.confirm('למחוק את הרישום הזה מהיומן?'))onDelete(e.id)}}>מחיקה</button></div>}</div>):<div className="empty card">אין רישומים בתאריך הזה.</div>}</div></main>}
+function Diary({entries,selectedDate,goals,onDateChange,onUpdate,onDelete}){
+  const [editing,setEditing]=useState(null);
+  const [grams,setGrams]=useState('');
+  const totals=entries.reduce((a,e)=>{
+    a.kcal+=Number(e.calories??e.kcal??0);
+    a.protein+=Number(e.protein_g??e.protein??0);
+    a.carbs+=Number(e.carbs_g??e.carbs??0);
+    a.fat+=Number(e.fat_g??e.fat??0);
+    return a;
+  },emptyNutrition());
+  const calorieGoal=Math.max(1,Number(goals?.calories)||1);
+  const proteinGoal=Math.max(1,Number(goals?.protein)||1);
+  const caloriePercent=Math.round(totals.kcal/calorieGoal*100);
+  const proteinPercent=Math.round(totals.protein/proteinGoal*100);
+  return <main>
+    <div className="intro"><span className="muted">היומן</span><h2>יומן אכילה</h2><label className="diary-date">בחירת תאריך<input type="date" value={selectedDate} max={todayKey()} onChange={e=>{onDateChange(e.target.value);setEditing(null)}}/></label></div>
+    <section className="card diary-summary">
+      <div className="diary-summary-head"><strong>סיכום יומי</strong><span>{entries.length} פריטים</span></div>
+      <div className="diary-summary-main"><strong>{round(totals.kcal)}</strong><span>מתוך {round(calorieGoal)} קלוריות</span></div>
+      <div className="diary-progress"><i style={{width:Math.min(100,caloriePercent)+'%'}}/></div>
+      <div className="diary-goal-note">{caloriePercent>100?'חרגת ב־'+round(totals.kcal-calorieGoal)+' קלוריות':'נותרו '+round(Math.max(0,calorieGoal-totals.kcal))+' קלוריות'}</div>
+      <div className="diary-protein-row"><span>חלבון</span><strong>{round(totals.protein)} / {round(proteinGoal)} גרם</strong></div>
+      <div className="diary-progress protein"><i style={{width:Math.min(100,proteinPercent)+'%'}}/></div>
+      <div className="diary-macros"><div><span>פחמימות</span><strong>{round(totals.carbs)}g</strong></div><div><span>שומן</span><strong>{round(totals.fat)}g</strong></div></div>
+    </section>
+    <div className="section-title"><h2>מה אכלתי?</h2><span>{entries.length} פריטים</span></div>
+    <div className="stack">{entries.length?entries.map(e=><div className="card diary-entry" key={e.id}><div className="entry"><div className="meal-icon">🍽️</div><div className="meal-copy"><strong>{e.foods?.name_he||e.name||'מזון'}</strong><span>{new Date(e.eaten_at).toLocaleTimeString('he-IL',{hour:'2-digit',minute:'2-digit'})} · {e.quantity_g||e.grams} גרם · {round(e.protein_g??e.protein)} גרם חלבון</span></div><b>{round(e.calories??e.kcal)} קל׳</b></div>{editing===e.id?<div className="diary-edit"><label>כמות בגרמים<input type="number" min="1" step="1" value={grams} onChange={x=>setGrams(x.target.value)}/></label><div className="diary-actions"><button className="primary" onClick={()=>{onUpdate(e.id,grams);setEditing(null)}}>שמירה</button><button className="secondary" onClick={()=>setEditing(null)}>ביטול</button></div></div>:<div className="diary-actions"><button className="secondary" onClick={()=>{setEditing(e.id);setGrams(String(e.quantity_g||e.grams||''))}}>עריכה</button><button className="secondary" onClick={()=>{if(window.confirm('למחוק את הרישום הזה מהיומן?'))onDelete(e.id)}}>מחיקה</button></div>}</div>):<div className="empty card">אין רישומים בתאריך הזה.</div>}</div>
+  </main>
+}
 
 function Progress({weight,history}){return <main><div className="intro"><span className="muted">התקדמות</span><h2>ההתקדמות שלי</h2><p>המשקלים נשמרים עכשיו במסד הנתונים שלך.</p></div><div className="card progress-card"><span className="muted">משקל אחרון</span><strong>{weight?weight+' ק״ג':'—'}</strong><div className="fake-chart">{history.slice(0,6).reverse().map((x,i)=><i style={{height:Math.max(20,Math.min(100,Number(x.weight_kg)||20))+'%'}} key={i}/>)}</div></div></main>}
 
