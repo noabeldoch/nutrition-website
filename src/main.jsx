@@ -98,6 +98,7 @@ function App(){
   const [diary,setDiary]=useState([]);
   const [weight,setWeight]=useState('');
   const [weightHistory,setWeightHistory]=useState([]);
+  const [goals,setGoals]=useState(()=>{try{return JSON.parse(localStorage.getItem('nutrition-goals'))||{calories:1800,protein:100,targetWeight:''}}catch{return {calories:1800,protein:100,targetWeight:''}}});
   const [showRecipe,setShowRecipe]=useState(false);
   const [showFood,setShowFood]=useState(false);
   const [toast,setToast]=useState('');
@@ -197,13 +198,15 @@ function App(){
         if(!mounted)return;
         setUser(session?.user||null);
         if(session?.user && supabase){
-          const [foodsRes,recipesRes,diaryRes,weightRes]=await Promise.all([
+          const [foodsRes,recipesRes,diaryRes,weightRes,preferencesRes]=await Promise.all([
             supabase.from('foods').select('*').order('name_he').limit(200),
             supabase.from('recipes').select('id,name,final_weight_g,recipe_ingredients(id,quantity_g,food_id,foods(*))').order('created_at',{ascending:false}),
             supabase.from('diary_entries').select('id,eaten_at,quantity_g,calories,protein_g,carbs_g,fat_g,food_id,recipe_id,foods(name_he)').gte('eaten_at',today+'T00:00:00').order('eaten_at',{ascending:false}),
-            supabase.from('weight_entries').select('id,measured_at,weight_kg').order('measured_at',{ascending:false}).limit(100)
+            supabase.from('weight_entries').select('id,measured_at,weight_kg').order('measured_at',{ascending:false}).limit(100),
+            supabase.from('user_preferences').select('calorie_goal,protein_goal_g,target_weight_kg').eq('user_id',session.user.id).maybeSingle()
           ]);
-          for(const r of [foodsRes,recipesRes,diaryRes,weightRes]) if(r.error) throw r.error;
+          for(const r of [foodsRes,recipesRes,diaryRes,weightRes,preferencesRes]) if(r.error) throw r.error;
+          if(preferencesRes.data){const nextGoals={calories:preferencesRes.data.calorie_goal,protein:preferencesRes.data.protein_goal_g,targetWeight:preferencesRes.data.target_weight_kg??''};setGoals(nextGoals);localStorage.setItem('nutrition-goals',JSON.stringify(nextGoals));}
           const mappedFoods=(foodsRes.data||[]).map(f=>({id:f.id,name:f.name_he,name_en:f.name_en,kcal:Number(f.kcal_per_100g),protein:Number(f.protein_per_100g),carbs:Number(f.carbs_per_100g),fat:Number(f.fat_per_100g)}));
           const mappedRecipes=(recipesRes.data||[]).map(r=>({
             id:r.id,name:r.name,finalWeight:Number(r.final_weight_g),
@@ -243,6 +246,14 @@ function App(){
   },[user]);
 
   function notify(t){setToast(t);setTimeout(()=>setToast(''),2500)}
+
+  async function saveGoals(nextGoals){
+    const normalized={calories:Math.round(Number(nextGoals.calories)),protein:Number(nextGoals.protein),targetWeight:nextGoals.targetWeight===''?'':Number(nextGoals.targetWeight)};
+    if(!Number.isFinite(normalized.calories)||normalized.calories<500||normalized.calories>10000||!Number.isFinite(normalized.protein)||normalized.protein<0||normalized.protein>500||(normalized.targetWeight!==''&&(!Number.isFinite(normalized.targetWeight)||normalized.targetWeight<20||normalized.targetWeight>500))){notify('בדקי את הערכים שהזנת');return;}
+    setGoals(normalized);localStorage.setItem('nutrition-goals',JSON.stringify(normalized));
+    if(supabase&&user){const {error}=await supabase.from('user_preferences').upsert({user_id:user.id,calorie_goal:normalized.calories,protein_goal_g:normalized.protein,target_weight_kg:normalized.targetWeight===''?null:normalized.targetWeight,updated_at:new Date().toISOString()},{onConflict:'user_id'});if(error){console.error(error);notify('היעדים נשמרו במכשיר, אך לא בענן');return;}}
+    notify('היעדים נשמרו ✓');
+  }
 
   async function addDiary(entry){
     const localEntry={
@@ -309,11 +320,11 @@ function App(){
     <header><div><div className="eyebrow">הַתְּזוֹנָאִית שֶׁלִּי</div><h1>{tab==='היום'?'ערב טוב, נועה':tab}</h1></div><div className="avatar">נ</div></header>
     {dbError&&<div className="card" style={{margin:'0 16px 12px',padding:'12px'}}>{dbError}</div>}
     {loading&&<div className="card" style={{margin:'0 16px 12px',padding:'12px'}}>מתחברת לנתונים…</div>}
-    {tab==='היום'&&<Today totals={totals} entries={todayEntries} onAdd={()=>setShowFood(true)} onRecipe={()=>setShowRecipe(true)} weight={weight} setWeight={setWeight} saveWeight={saveWeight} photo={photo} addPhoto={e=>{const f=e.target.files?.[0];if(f){setPhoto(URL.createObjectURL(f));notify('התמונה נוספה')}}}/>}
+    {tab==='היום'&&<Today goals={goals} totals={totals} entries={todayEntries} onAdd={()=>setShowFood(true)} onRecipe={()=>setShowRecipe(true)} weight={weight} setWeight={setWeight} saveWeight={saveWeight} photo={photo} addPhoto={e=>{const f=e.target.files?.[0];if(f){setPhoto(URL.createObjectURL(f));notify('התמונה נוספה')}}}/>}
     {tab==='מתכונים'&&<Recipes recipes={recipes} onNew={()=>setShowRecipe(true)} onLog={addDiary}/>}
     {tab==='יומן'&&<Diary entries={todayEntries}/>}
     {tab==='התקדמות'&&<Progress weight={weight} history={weightHistory}/>}
-    {tab==='הגדרות'&&<Settings user={user} connected={Boolean(user)} cloudEnabled={supabaseConfigured} onLinkGoogle={linkGoogleAccount}/ >}
+    {tab==='הגדרות'&&<Settings user={user} connected={Boolean(user)} cloudEnabled={supabaseConfigured} goals={goals} onSaveGoals={saveGoals} onLinkGoogle={linkGoogleAccount}/ >}
     {showRecipe&&<RecipeModal foods={foods} onClose={()=>setShowRecipe(false)} onSave={saveRecipe}/>}
     {showFood&&<FoodModal foods={foods} recipes={recipes} onClose={()=>setShowFood(false)} onAdd={e=>{addDiary(e);setShowFood(false)}}/>}
     {toast&&<div className="toast">{toast}</div>}
@@ -321,8 +332,8 @@ function App(){
   </div>
 }
 
-function Today({totals,entries,onAdd,onRecipe,weight,setWeight,saveWeight,photo,addPhoto}){return <main>
-  <section className="hero"><div><span className="muted">היום</span><div className="big-number">{round(totals.kcal)}<small> קל׳</small></div><div className="muted">חלבון {round(totals.protein)} גרם</div></div><div className="ring"><span>{Math.min(100,Math.round(totals.kcal/1800*100))}%</span></div></section>
+function Today({goals,totals,entries,onAdd,onRecipe,weight,setWeight,saveWeight,photo,addPhoto}){const kcalPercent=Math.min(100,Math.round(totals.kcal/Math.max(1,goals.calories)*100));return <main>
+  <section className="hero"><div><span className="muted">היום</span><div className="big-number">{round(totals.kcal)}<small> קל׳</small></div><div className="muted">מתוך {goals.calories} קל׳ · חלבון {round(totals.protein)} / {round(goals.protein)} גרם</div></div><div className="ring" style={{background:`conic-gradient(#61745c 0 ${kcalPercent}%,#d0d7c9 ${kcalPercent}% 100%)`}}><span>{kcalPercent}%</span></div></section>
   <div className="section-title"><h2>מה אכלתי היום?</h2><span>{entries.length} פריטים</span></div>
   <section className="card meal-list">{entries.length===0?<div className="empty">עדיין לא הוספת אוכל להיום.</div>:entries.map(e=><div className="entry" key={e.id}><div className="meal-icon">🍽️</div><div className="meal-copy"><strong>{e.foods?.name_he||e.name||'מזון'}</strong><span>{e.quantity_g||e.grams} גרם</span></div><div className="meal-right">{round(e.calories??e.kcal)} קל׳</div></div>)}</section>
   <div className="quick-grid"><button className="quick" onClick={onAdd}><span className="quick-icon">＋</span><strong>הוספת מזון</strong><span>חיפוש במאגר מזון אמיתי והוספה לפי גרמים</span></button><button className="quick" onClick={onRecipe}><span className="quick-icon">🍲</span><strong>מתכון חדש</strong><span>צרי מתכון וחישוב אוטומטי למנה</span></button></div>
@@ -336,7 +347,7 @@ function Diary({entries}){return <main><div className="intro"><span className="m
 
 function Progress({weight,history}){return <main><div className="intro"><span className="muted">התקדמות</span><h2>ההתקדמות שלי</h2><p>המשקלים נשמרים עכשיו במסד הנתונים שלך.</p></div><div className="card progress-card"><span className="muted">משקל אחרון</span><strong>{weight?weight+' ק״ג':'—'}</strong><div className="fake-chart">{history.slice(0,6).reverse().map((x,i)=><i style={{height:Math.max(20,Math.min(100,Number(x.weight_kg)||20))+'%'}} key={i}/>)}</div></div></main>}
 
-function Settings({connected,user,cloudEnabled,onLinkGoogle}){const linked=Boolean(user&&!user.is_anonymous);return <main><div className="intro"><span className="muted">הגדרות</span><h2>הגדרות</h2><p>{connected?'הנתונים שלך מסונכרנים לענן.':'הנתונים נשמרים במכשיר הזה בלבד. חיפוש מזון דורש חיבור לאינטרנט.'}</p></div><section className="card" style={{padding:16,marginBottom:12}}><strong>גיבוי ושחזור</strong><p className="muted">{linked?'החשבון שלך מקושר וניתן לשחזר את הנתונים באמצעות Google.':connected?'הנתונים מסונכרנים לענן, אך עדיין משויכים למשתמש אנונימי במכשיר הזה.':'התחברי כדי לגבות ולשחזר נתונים בין מכשירים.'}</p>{cloudEnabled&&!linked&&<button className="primary full" onClick={onLinkGoogle}>התחברות וקישור באמצעות Google</button>}{linked&&<div className="muted">✓ חשבון Google מקושר</div>}</section>{['יעד קלורי','יעד חלבון','משקל יעד','התראות'].map(x=><div className="setting card" key={x}><span>{x}</span><b>›</b></div>)}</main>}
+function Settings({connected,user,cloudEnabled,onLinkGoogle,goals,onSaveGoals}){const linked=Boolean(user&&!user.is_anonymous);const [calories,setCalories]=useState(String(goals.calories));const [protein,setProtein]=useState(String(goals.protein));const [targetWeight,setTargetWeight]=useState(goals.targetWeight===''?'':String(goals.targetWeight));useEffect(()=>{setCalories(String(goals.calories));setProtein(String(goals.protein));setTargetWeight(goals.targetWeight===''?'':String(goals.targetWeight));},[goals]);return <main><div className="intro"><span className="muted">הגדרות</span><h2>הגדרות</h2><p>{connected?'הנתונים שלך מסונכרנים לענן.':'הנתונים נשמרים במכשיר הזה בלבד. חיפוש מזון דורש חיבור לאינטרנט.'}</p></div><section className="card" style={{padding:16,marginBottom:12}}><strong>גיבוי ושחזור</strong><p className="muted">{linked?'החשבון שלך מקושר וניתן לשחזר את הנתונים באמצעות Google.':connected?'הנתונים מסונכרנים לענן, אך עדיין משויכים למשתמש אנונימי במכשיר הזה.':'התחברי כדי לגבות ולשחזר נתונים בין מכשירים.'}</p>{cloudEnabled&&!linked&&<button className="primary full" onClick={onLinkGoogle}>התחברות וקישור באמצעות Google</button>}{linked&&<div className="muted">✓ חשבון Google מקושר</div>}</section><section className="card goals-card"><h3>היעדים שלי</h3><p>הגדירי יעדים אישיים. הם יישמרו בחשבון ויסתנכרנו בין המכשירים.</p><label>יעד קלורי יומי (קלוריות)<input type="number" inputMode="numeric" min="500" max="10000" value={calories} onChange={e=>setCalories(e.target.value)}/></label><label>יעד חלבון יומי (גרם)<input type="number" inputMode="decimal" min="0" max="500" step="1" value={protein} onChange={e=>setProtein(e.target.value)}/></label><label>משקל יעד (ק״ג)<input type="number" inputMode="decimal" min="20" max="500" step="0.1" placeholder="לא חובה" value={targetWeight} onChange={e=>setTargetWeight(e.target.value)}/></label><button className="primary full" onClick={()=>onSaveGoals({calories,protein,targetWeight})}>שמירת יעדים</button></section></main>}
 
 function RecipeModal({foods,onClose,onSave}){const [name,setName]=useState('');const [finalWeight,setFinalWeight]=useState('');const [ingredients,setIngredients]=useState([]);const [foodId,setFoodId]=useState(foods[0]?.id);const [grams,setGrams]=useState('100');const total=calcRecipe({ingredients});const per=finalWeight?Object.fromEntries(nutrientKeys.map(k=>[k,total[k]/Number(finalWeight)*100])):null;return <Modal title="מתכון חדש" onClose={onClose}><label>שם המתכון<input value={name} onChange={e=>setName(e.target.value)} placeholder="למשל: פשטידת קישואים"/></label><div className="ingredient-add"><select value={foodId} onChange={e=>setFoodId(e.target.value)}>{foods.map(f=><option key={f.id} value={f.id}>{f.name}</option>)}</select><input inputMode="decimal" value={grams} onChange={e=>setGrams(e.target.value)} placeholder="גרם"/><button className="secondary" onClick={()=>{const food=foods.find(f=>f.id===foodId);if(food)setIngredients([...ingredients,{food,grams:Number(grams)||0}])}}>הוסף</button></div><div className="ingredient-list">{ingredients.map((i,idx)=><div key={idx}><span>{i.food.name}</span><b>{i.grams}g</b></div>)}</div><div className="calc-box"><b>סה״כ המתכון</b><span>{round(total.kcal)} קל׳ · {round(total.protein)}g חלבון</span></div><label>משקל סופי אחרי הכנה (גרם)<input inputMode="decimal" value={finalWeight} onChange={e=>setFinalWeight(e.target.value)} placeholder="למשל 500"/></label>{per&&<div className="calc-box highlight"><b>ל־100 גרם</b><span>{round(per.kcal)} קל׳ · {round(per.protein)}g חלבון · {round(per.carbs)}g פחמימות · {round(per.fat)}g שומן</span></div>}<button className="primary full" disabled={!name||!ingredients.length||!Number(finalWeight)} onClick={()=>onSave({id:crypto.randomUUID(),name,finalWeight:Number(finalWeight),ingredients})}>שמור מתכון</button></Modal>}
 
