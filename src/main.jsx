@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { supabase, supabaseConfigured } from './lib/supabase';
 import './styles.css';
+import { localDb, readLocalSnapshot, cacheSnapshot, queueOperation, pendingOperations, markOperationSynced, markOperationFailed } from './lib/local-db';
 
 const DEMO_FOODS = [
   { id:'demo-egg', name:'ביצה', unit:'גרם', kcal:143, protein:12.6, carbs:0.7, fat:9.5 },
@@ -22,7 +23,8 @@ const DEMO_FOODS = [
 const nutrientKeys=['kcal','protein','carbs','fat'];
 const emptyNutrition=()=>({kcal:0,protein:0,carbs:0,fat:0});
 const round=n=>Math.round((Number(n)||0)*10)/10;
-const todayKey=()=>new Date().toISOString().slice(0,10);
+const todayKey=(date=new Date())=>{const y=date.getFullYear();const m=String(date.getMonth()+1).padStart(2,'0');const d=String(date.getDate()).padStart(2,'0');return `${y}-${m}-${d}`};
+const entryDateKey=value=>{const date=new Date(value);return Number.isNaN(date.getTime())?'':todayKey(date)};
 const calcIngredient=(food,g)=>{const f=Number(g)/100;return {kcal:food.kcal*f,protein:food.protein*f,carbs:food.carbs*f,fat:food.fat*f}};
 const calcRecipe=recipe=>recipe.ingredients.reduce((a,i)=>{const n=calcIngredient(i.food,i.grams);nutrientKeys.forEach(k=>a[k]+=n[k]);return a},emptyNutrition());
 
@@ -96,6 +98,8 @@ function App(){
   const [diary,setDiary]=useState([]);
   const [weight,setWeight]=useState('');
   const [weightHistory,setWeightHistory]=useState([]);
+  const [goals,setGoals]=useState(()=>{try{return JSON.parse(localStorage.getItem('nutrition-goals'))||{calories:1800,protein:100,targetWeight:''}}catch{return {calories:1800,protein:100,targetWeight:''}}});
+  const [selectedDiaryDate,setSelectedDiaryDate]=useState(todayKey());
   const [showRecipe,setShowRecipe]=useState(false);
   const [showFood,setShowFood]=useState(false);
   const [toast,setToast]=useState('');
@@ -104,87 +108,234 @@ function App(){
   const [dbError,setDbError]=useState('');
   const today=todayKey();
 
+  async function linkGoogleAccount(){
+    if(!supabase) return;
+    try{
+      // Read the persisted session directly so a delayed React auth-state update
+      // cannot hide the linking action or cause us to create a second user.
+      const {data:{session},error:sessionError}=await supabase.auth.getSession();
+      if(sessionError) throw sessionError;
+      if(!session?.user){
+        notify('לא נמצאה התחברות פעילה. הנתונים המקומיים לא נמחקו — נסי לרענן את האפליקציה.');
+        return;
+      }
+      if(!session.user.is_anonymous){ notify('חשבון Google כבר מקושר ✓'); return; }
+      // This PWA may have a fresh anonymous user while Google is already
+      // linked to the user's existing account in Safari. Sign out only this
+      // fresh local anonymous session; this does not clear IndexedDB data.
+      // Then OAuth is a sign-in flow, not an attempt to link an existing identity.
+      const {error:signOutError}=await supabase.auth.signOut({scope:'local'});
+      if(signOutError) throw signOutError;
+      const {error}=await supabase.auth.signInWithOAuth({
+        provider:'google',
+        options:{redirectTo:window.location.origin}
+      });
+      if(error) throw error;
+    }catch(e){
+      console.error('Google account linking failed',e);
+      notify('לא הצלחתי להתחיל קישור Google. בדקי את הגדרות הספק ב-Supabase.');
+    }
+  }
+
+  async function syncQueuedOperations(){
+    if(!supabase || !user || !navigator.onLine) return;
+    const operations=await pendingOperations();
+    for(const operation of operations){
+      try{
+        const p=operation.payload;
+        if(operation.type==='diary'){
+          const foodId=p.foodId?.startsWith('demo-') ? await seedDemoFood(p.food) : p.food?.source_id ? await ensureFoodRow(p.food) : p.foodId || (p.food ? await ensureFoodRow(p.food) : null);
+          const {error}=await supabase.from('diary_entries').upsert({
+            id:p.id,user_id:user.id,eaten_at:p.eaten_at,food_id:foodId,recipe_id:p.recipeId||null,
+            quantity_g:p.grams,calories:p.kcal,protein_g:p.protein,carbs_g:p.carbs,fat_g:p.fat
+          },{onConflict:'id'});
+          if(error) throw error;
+        }else if(operation.type==='diary_update'){
+          const {error}=await supabase.from('diary_entries').update({eaten_at:p.eaten_at,quantity_g:p.grams,calories:p.kcal,protein_g:p.protein,carbs_g:p.carbs,fat_g:p.fat}).eq('id',p.id);
+          if(error) throw error;
+        }else if(operation.type==='diary_delete'){
+          const {error}=await supabase.from('diary_entries').delete().eq('id',p.id);
+          if(error) throw error;
+        }else if(operation.type==='weight'){
+          const {error}=await supabase.from('weight_entries').upsert({
+            id:p.id,user_id:user.id,measured_at:p.measured_at,weight_kg:p.weight_kg
+          },{onConflict:'id'});
+          if(error) throw error;
+        }else if(operation.type==='recipe'){
+          const {error}=await supabase.from('recipes').upsert({
+            id:p.id,user_id:user.id,name:p.name,final_weight_g:p.finalWeight
+          },{onConflict:'id'});
+          if(error) throw error;
+          const rows=[];
+          for(const i of p.ingredients){
+            const foodId=i.food.id?.startsWith('demo-')?await seedDemoFood(i.food):i.food.source_id?await ensureFoodRow(i.food):i.food.id||await ensureFoodRow(i.food);
+            rows.push({id:i.id,recipe_id:p.id,food_id:foodId,quantity_g:i.grams});
+          }
+          const {error:ingredientError}=await supabase.from('recipe_ingredients').upsert(rows,{onConflict:'id'});
+          if(ingredientError) throw ingredientError;
+        }
+        await markOperationSynced(operation.seq);
+      }catch(e){
+        console.warn('Offline sync will retry later',e);
+        await markOperationFailed(operation.seq,(operation.attempts||0)+1);
+        break;
+      }
+    }
+  }
+
   useEffect(()=>{
     let mounted=true;
+    const {data:authListener}=supabase?.auth.onAuthStateChange((_event,session)=>{
+      if(mounted) setUser(session?.user||null);
+    }) || {data:{subscription:null}};
     (async()=>{
+      try{
+        const cached=await readLocalSnapshot();
+        if(!mounted)return;
+        if(cached.foods.length)setFoods([...DEMO_FOODS,...cached.foods.filter(f=>!DEMO_FOODS.some(d=>d.id===f.id))]);
+        if(cached.recipes.length)setRecipes(cached.recipes);
+        if(cached.diary.length)setDiary(cached.diary);
+        if(cached.weights.length){
+          setWeightHistory(cached.weights);
+          setWeight(cached.weights[0].weight_kg?.toString()||'');
+        }
+      }catch(e){console.warn('Could not read local cache',e)}
       try{
         const session=await getSession();
         if(!mounted)return;
         setUser(session?.user||null);
         if(session?.user && supabase){
-          const [foodsRes,recipesRes,diaryRes,weightRes]=await Promise.all([
+          const [foodsRes,recipesRes,diaryRes,weightRes,preferencesRes]=await Promise.all([
             supabase.from('foods').select('*').order('name_he').limit(200),
             supabase.from('recipes').select('id,name,final_weight_g,recipe_ingredients(id,quantity_g,food_id,foods(*))').order('created_at',{ascending:false}),
-            supabase.from('diary_entries').select('id,eaten_at,quantity_g,calories,protein_g,carbs_g,fat_g,food_id,recipe_id,foods(name_he)').gte('eaten_at',today+'T00:00:00').order('eaten_at',{ascending:false}),
-            supabase.from('weight_entries').select('id,measured_at,weight_kg').order('measured_at',{ascending:false}).limit(100)
+            supabase.from('diary_entries').select('id,eaten_at,quantity_g,calories,protein_g,carbs_g,fat_g,food_id,recipe_id,foods(name_he)').order('eaten_at',{ascending:false}).limit(500),
+            supabase.from('weight_entries').select('id,measured_at,weight_kg').order('measured_at',{ascending:false}).limit(100),
+            supabase.from('user_preferences').select('calorie_goal,protein_goal_g,target_weight_kg').eq('user_id',session.user.id).maybeSingle()
           ]);
-          for(const r of [foodsRes,recipesRes,diaryRes,weightRes]) if(r.error) throw r.error;
-          if(foodsRes.data?.length){
-            setFoods(foodsRes.data.map(f=>({id:f.id,name:f.name_he,name_en:f.name_en,kcal:Number(f.kcal_per_100g),protein:Number(f.protein_per_100g),carbs:Number(f.carbs_per_100g),fat:Number(f.fat_per_100g)})));
-          }
-          setRecipes((recipesRes.data||[]).map(r=>({
+          for(const r of [foodsRes,recipesRes,diaryRes,weightRes,preferencesRes]) if(r.error) throw r.error;
+          if(preferencesRes.data){const nextGoals={calories:preferencesRes.data.calorie_goal,protein:preferencesRes.data.protein_goal_g,targetWeight:preferencesRes.data.target_weight_kg??''};setGoals(nextGoals);localStorage.setItem('nutrition-goals',JSON.stringify(nextGoals));}
+          const mappedFoods=(foodsRes.data||[]).map(f=>({id:f.id,name:f.name_he,name_en:f.name_en,kcal:Number(f.kcal_per_100g),protein:Number(f.protein_per_100g),carbs:Number(f.carbs_per_100g),fat:Number(f.fat_per_100g)}));
+          const mappedRecipes=(recipesRes.data||[]).map(r=>({
             id:r.id,name:r.name,finalWeight:Number(r.final_weight_g),
             ingredients:(r.recipe_ingredients||[]).map(i=>({id:i.id,grams:Number(i.quantity_g),food:i.foods?{id:i.foods.id,name:i.foods.name_he,kcal:Number(i.foods.kcal_per_100g),protein:Number(i.foods.protein_per_100g),carbs:Number(i.foods.carbs_per_100g),fat:Number(i.foods.fat_per_100g)}:null})).filter(i=>i.food)
-          })));
-          setDiary(diaryRes.data||[]);
-          setWeightHistory(weightRes.data||[]);
-          setWeight(weightRes.data?.[0]?.weight_kg?.toString()||'');
+          }));
+          const mappedDiary=diaryRes.data||[];
+          const mappedWeights=weightRes.data||[];
+          if(mappedFoods.length)setFoods([...DEMO_FOODS,...mappedFoods.filter(f=>!DEMO_FOODS.some(d=>d.id===f.id))]);
+          const [localAfter,queued]=await Promise.all([readLocalSnapshot(),pendingOperations()]);
+          const mergedRecipes=[...localAfter.recipes.filter(r=>queued.some(o=>o.type==='recipe'&&o.payload.id===r.id)),...mappedRecipes];
+          const mergedDiary=[...localAfter.diary.filter(e=>queued.some(o=>o.type==='diary'&&o.payload.id===e.id)),...mappedDiary];
+          const mergedWeights=[...localAfter.weights.filter(w=>queued.some(o=>o.type==='weight'&&o.payload.id===w.id)),...mappedWeights];
+          setRecipes(mergedRecipes);
+          setDiary(mergedDiary);
+          setWeightHistory(mergedWeights);
+          setWeight(mergedWeights[0]?.weight_kg?.toString()||'');
+          await cacheSnapshot({foods:[...mappedFoods,...localAfter.foods],recipes:mergedRecipes,diary:mergedDiary,weights:mergedWeights});
         }
       }catch(e){
         console.error(e);
         if(mounted)setDbError(supabaseConfigured?'לא הצלחתי להתחבר למסד הנתונים. בדקי את הגדרות Supabase.':'החיבור ל-Supabase עדיין לא הוגדר.');
       }finally{if(mounted)setLoading(false)}
     })();
-    return()=>{mounted=false};
+    return()=>{mounted=false;authListener?.subscription?.unsubscribe()};
   },[]);
+
+  useEffect(()=>{
+    if(!user || !supabase) return;
+    const sync=()=>syncQueuedOperations();
+    window.addEventListener('online',sync);
+    document.addEventListener('visibilitychange',sync);
+    sync();
+    return()=>{
+      window.removeEventListener('online',sync);
+      document.removeEventListener('visibilitychange',sync);
+    };
+  },[user]);
 
   function notify(t){setToast(t);setTimeout(()=>setToast(''),2500)}
 
+  async function saveGoals(nextGoals){
+    const normalized={calories:Math.round(Number(nextGoals.calories)),protein:Number(nextGoals.protein),targetWeight:nextGoals.targetWeight===''?'':Number(nextGoals.targetWeight)};
+    if(!Number.isFinite(normalized.calories)||normalized.calories<500||normalized.calories>10000||!Number.isFinite(normalized.protein)||normalized.protein<0||normalized.protein>500||(normalized.targetWeight!==''&&(!Number.isFinite(normalized.targetWeight)||normalized.targetWeight<20||normalized.targetWeight>500))){notify('בדקי את הערכים שהזנת');return;}
+    setGoals(normalized);localStorage.setItem('nutrition-goals',JSON.stringify(normalized));
+    if(supabase&&user){const {error}=await supabase.from('user_preferences').upsert({user_id:user.id,calorie_goal:normalized.calories,protein_goal_g:normalized.protein,target_weight_kg:normalized.targetWeight===''?null:normalized.targetWeight,updated_at:new Date().toISOString()},{onConflict:'user_id'});if(error){console.error(error);notify('היעדים נשמרו במכשיר, אך לא בענן');return;}}
+    notify('היעדים נשמרו ✓');
+  }
+
   async function addDiary(entry){
+    const localEntry={
+      id:crypto.randomUUID(),eaten_at:new Date().toISOString(),quantity_g:entry.grams,
+      calories:entry.kcal,protein_g:entry.protein,carbs_g:entry.carbs,fat_g:entry.fat,
+      food_id:entry.foodId||null,recipe_id:entry.recipeId||null,
+      foods:{name_he:entry.name},name:entry.name
+    };
     try{
-      if(supabase && user){
-        const foodId=entry.foodId || await ensureFoodRow(entry.food);
-        const {data,error}=await supabase.from('diary_entries').insert({
-          user_id:user.id,eaten_at:new Date().toISOString(),food_id:foodId,recipe_id:entry.recipeId||null,
-          quantity_g:entry.grams,calories:entry.kcal,protein_g:entry.protein,carbs_g:entry.carbs,fat_g:entry.fat
-        }).select('id,eaten_at,quantity_g,calories,protein_g,carbs_g,fat_g,food_id,recipe_id,foods(name_he)').single();
-        if(error)throw error;
-        setDiary(d=>[data,...d]);
-      }else{
-        setDiary(d=>[{id:crypto.randomUUID(),...entry,calories:entry.kcal,protein_g:entry.protein,carbs_g:entry.carbs,fat_g:entry.fat},...d]);
-      }
+      await localDb.diary.put(localEntry);
+      if(entry.food) await localDb.foods.put({...entry.food,id:entry.food.id||crypto.randomUUID()});
+      await queueOperation('diary',{...entry,id:localEntry.id,eaten_at:localEntry.eaten_at,user_id:user?.id||null});
+      setDiary(d=>[localEntry,...d]);
+      if(supabase && user && navigator.onLine) await syncQueuedOperations();
       notify('נוסף ליומן ✓');
-    }catch(e){console.error(e);notify('לא הצלחתי לשמור את המזון');}
+    }catch(e){console.error(e);notify('נשמר מקומית — הסנכרון ינסה שוב');}
+  }
+
+  async function updateDiaryEntry(entryId,nextGrams){
+    const grams=Number(nextGrams);
+    const current=diary.find(e=>e.id===entryId);
+    if(!current||!Number.isFinite(grams)||grams<=0){notify('יש להזין כמות תקינה');return;}
+    const oldGrams=Number(current.quantity_g||current.grams||0);
+    if(oldGrams<=0)return;
+    const factor=grams/oldGrams;
+    const updated={...current,quantity_g:grams,calories:round(Number((current.calories??current.kcal) || 0)*factor),protein_g:round(Number((current.protein_g??current.protein) || 0)*factor),carbs_g:round(Number((current.carbs_g??current.carbs) || 0)*factor),fat_g:round(Number((current.fat_g??current.fat) || 0)*factor)};
+    try{
+      await localDb.diary.put(updated);
+      await queueOperation('diary_update',{id:updated.id,eaten_at:updated.eaten_at,grams:updated.quantity_g,kcal:updated.calories,protein:updated.protein_g,carbs:updated.carbs_g,fat:updated.fat_g,user_id:user?.id||null});
+      setDiary(items=>items.map(e=>e.id===entryId?updated:e));
+      if(supabase&&user&&navigator.onLine) await syncQueuedOperations();
+      notify('הרישום עודכן ✓');
+    }catch(e){console.error(e);notify('השינוי נשמר מקומית ויסתנכרן בהמשך');}
+  }
+
+  async function deleteDiaryEntry(entryId){
+    const current=diary.find(e=>e.id===entryId);
+    if(!current)return;
+    try{
+      await localDb.diary.delete(entryId);
+      await queueOperation('diary_delete',{id:entryId,user_id:user?.id||null});
+      setDiary(items=>items.filter(e=>e.id!==entryId));
+      if(supabase&&user&&navigator.onLine) await syncQueuedOperations();
+      notify('הרישום נמחק');
+    }catch(e){console.error(e);notify('לא הצלחתי למחוק את הרישום');}
   }
 
   async function saveWeight(){
     const value=Number(weight);
     if(!value)return;
+    const row={id:crypto.randomUUID(),weight_kg:value,measured_at:new Date().toISOString()};
     try{
-      if(supabase && user){
-        const {data,error}=await supabase.from('weight_entries').insert({user_id:user.id,weight_kg:value}).select().single();
-        if(error)throw error;
-        setWeightHistory(h=>[data,...h]);
-      }else setWeightHistory(h=>[{id:crypto.randomUUID(),weight_kg:value,measured_at:new Date().toISOString()},...h]);
+      await localDb.weights.put(row);
+      await queueOperation('weight',{...row,user_id:user?.id||null});
+      setWeightHistory(h=>[row,...h]);
+      if(supabase && user && navigator.onLine) await syncQueuedOperations();
       notify('המשקל נשמר ✓');
     }catch(e){console.error(e);notify('לא הצלחתי לשמור את המשקל');}
   }
 
   async function saveRecipe(recipe){
+    const localRecipe={
+      ...recipe,id:crypto.randomUUID(),
+      ingredients:recipe.ingredients.map(i=>({...i,id:crypto.randomUUID(),food:{...i.food,id:i.food.id||crypto.randomUUID()}}))
+    };
     try{
-      if(supabase && user){
-        const {data,error}=await supabase.from('recipes').insert({user_id:user.id,name:recipe.name,final_weight_g:recipe.finalWeight}).select().single();
-        if(error)throw error;
-        const rows=[];
-        for(const i of recipe.ingredients){
-          const foodId=i.food.id?.startsWith('demo-')?await seedDemoFood(i.food):i.food.id||await ensureFoodRow(i.food);
-          rows.push({recipe_id:data.id,food_id:foodId,quantity_g:i.grams});
-        }
-        const {error:ingredientError}=await supabase.from('recipe_ingredients').insert(rows);
-        if(ingredientError)throw ingredientError;
-        setRecipes(r=>[{...recipe,id:data.id},...r]);
-      }else setRecipes(r=>[{...recipe,id:crypto.randomUUID()},...r]);
-      setShowRecipe(false);notify('המתכון נשמר ✓');
+      await localDb.recipes.put(localRecipe);
+      await localDb.transaction('rw',localDb.foods,async()=>{
+        for(const i of localRecipe.ingredients) await localDb.foods.put(i.food);
+      });
+      await queueOperation('recipe',{...localRecipe,user_id:user?.id||null});
+      setRecipes(r=>[localRecipe,...r]);
+      setShowRecipe(false);
+      if(supabase && user && navigator.onLine) await syncQueuedOperations();
+      notify('המתכון נשמר ✓');
     }catch(e){console.error(e);notify('לא הצלחתי לשמור את המתכון');}
   }
 
@@ -198,18 +349,18 @@ function App(){
     return data.id;
   }
 
-  const todayEntries=diary;
+  const todayEntries=diary.filter(e=>entryDateKey(e.eaten_at)===today);
   const totals=useMemo(()=>todayEntries.reduce((a,e)=>{a.kcal+=Number(e.calories||e.kcal||0);a.protein+=Number(e.protein_g||e.protein||0);a.carbs+=Number(e.carbs_g||e.carbs||0);a.fat+=Number(e.fat_g||e.fat||0);return a},emptyNutrition()),[todayEntries]);
 
   return <div className="app">
     <header><div><div className="eyebrow">הַתְּזוֹנָאִית שֶׁלִּי</div><h1>{tab==='היום'?'ערב טוב, נועה':tab}</h1></div><div className="avatar">נ</div></header>
     {dbError&&<div className="card" style={{margin:'0 16px 12px',padding:'12px'}}>{dbError}</div>}
     {loading&&<div className="card" style={{margin:'0 16px 12px',padding:'12px'}}>מתחברת לנתונים…</div>}
-    {tab==='היום'&&<Today totals={totals} entries={todayEntries} onAdd={()=>setShowFood(true)} onRecipe={()=>setShowRecipe(true)} weight={weight} setWeight={setWeight} saveWeight={saveWeight} photo={photo} addPhoto={e=>{const f=e.target.files?.[0];if(f){setPhoto(URL.createObjectURL(f));notify('התמונה נוספה')}}}/>}
+    {tab==='היום'&&<Today goals={goals} totals={totals} entries={todayEntries} onAdd={()=>setShowFood(true)} onRecipe={()=>setShowRecipe(true)} weight={weight} setWeight={setWeight} saveWeight={saveWeight} photo={photo} addPhoto={e=>{const f=e.target.files?.[0];if(f){setPhoto(URL.createObjectURL(f));notify('התמונה נוספה')}}}/>}
     {tab==='מתכונים'&&<Recipes recipes={recipes} onNew={()=>setShowRecipe(true)} onLog={addDiary}/>}
-    {tab==='יומן'&&<Diary entries={todayEntries}/>}
+    {tab==='יומן'&&<Diary entries={diary.filter(e=>entryDateKey(e.eaten_at)===selectedDiaryDate)} selectedDate={selectedDiaryDate} goals={goals} onDateChange={setSelectedDiaryDate} onUpdate={updateDiaryEntry} onDelete={deleteDiaryEntry}/>}
     {tab==='התקדמות'&&<Progress weight={weight} history={weightHistory}/>}
-    {tab==='הגדרות'&&<Settings connected={Boolean(user)}/>}
+    {tab==='הגדרות'&&<Settings user={user} connected={Boolean(user)} cloudEnabled={supabaseConfigured} goals={goals} onSaveGoals={saveGoals} onLinkGoogle={linkGoogleAccount}/ >}
     {showRecipe&&<RecipeModal foods={foods} onClose={()=>setShowRecipe(false)} onSave={saveRecipe}/>}
     {showFood&&<FoodModal foods={foods} recipes={recipes} onClose={()=>setShowFood(false)} onAdd={e=>{addDiary(e);setShowFood(false)}}/>}
     {toast&&<div className="toast">{toast}</div>}
@@ -217,8 +368,8 @@ function App(){
   </div>
 }
 
-function Today({totals,entries,onAdd,onRecipe,weight,setWeight,saveWeight,photo,addPhoto}){return <main>
-  <section className="hero"><div><span className="muted">היום</span><div className="big-number">{round(totals.kcal)}<small> קל׳</small></div><div className="muted">חלבון {round(totals.protein)} גרם</div></div><div className="ring"><span>{Math.min(100,Math.round(totals.kcal/1800*100))}%</span></div></section>
+function Today({goals,totals,entries,onAdd,onRecipe,weight,setWeight,saveWeight,photo,addPhoto}){const kcalPercent=Math.min(100,Math.round(totals.kcal/Math.max(1,goals.calories)*100));return <main>
+  <section className="hero"><div><span className="muted">היום</span><div className="big-number">{round(totals.kcal)}<small> קל׳</small></div><div className="muted">מתוך {goals.calories} קל׳ · חלבון {round(totals.protein)} / {round(goals.protein)} גרם</div></div><div className="ring" style={{background:`conic-gradient(#61745c 0 ${kcalPercent}%,#d0d7c9 ${kcalPercent}% 100%)`}}><span>{kcalPercent}%</span></div></section>
   <div className="section-title"><h2>מה אכלתי היום?</h2><span>{entries.length} פריטים</span></div>
   <section className="card meal-list">{entries.length===0?<div className="empty">עדיין לא הוספת אוכל להיום.</div>:entries.map(e=><div className="entry" key={e.id}><div className="meal-icon">🍽️</div><div className="meal-copy"><strong>{e.foods?.name_he||e.name||'מזון'}</strong><span>{e.quantity_g||e.grams} גרם</span></div><div className="meal-right">{round(e.calories??e.kcal)} קל׳</div></div>)}</section>
   <div className="quick-grid"><button className="quick" onClick={onAdd}><span className="quick-icon">＋</span><strong>הוספת מזון</strong><span>חיפוש במאגר מזון אמיתי והוספה לפי גרמים</span></button><button className="quick" onClick={onRecipe}><span className="quick-icon">🍲</span><strong>מתכון חדש</strong><span>צרי מתכון וחישוב אוטומטי למנה</span></button></div>
@@ -228,11 +379,39 @@ function Today({totals,entries,onAdd,onRecipe,weight,setWeight,saveWeight,photo,
 
 function Recipes({recipes,onNew,onLog}){return <main><div className="intro"><span className="muted">המתכונים שלי</span><h2>המתכונים שלי</h2><p>שמרי מתכון פעם אחת, ואז הוסיפי ליומן כל כמות שתרצי.</p></div><button className="primary full" onClick={onNew}>＋ יצירת מתכון חדש</button><div className="stack">{recipes.length===0?<div className="empty card">עדיין אין מתכונים. צרי את הראשון.</div>:recipes.map(r=>{const n=calcRecipe(r);const per=r.finalWeight?Object.fromEntries(nutrientKeys.map(k=>[k,n[k]/r.finalWeight*100])):n;return <div className="recipe-card card" key={r.id}><div><strong>{r.name}</strong><p>{r.ingredients.length} מרכיבים · משקל סופי {r.finalWeight} גרם</p></div><div className="nutrition-mini"><b>{round(per.kcal)} קל׳</b><span>{round(per.protein)}g חלבון ל־100g</span></div><button className="secondary" onClick={()=>onLog({name:r.name,recipeId:r.id,grams:100,kcal:per.kcal,protein:per.protein,carbs:per.carbs,fat:per.fat})}>＋ 100 גרם ליומן</button></div>})}</div></main>}
 
-function Diary({entries}){return <main><div className="intro"><span className="muted">היומן</span><h2>מה אכלתי היום</h2></div><div className="stack">{entries.length?entries.map(e=><div className="card entry" key={e.id}><div className="meal-icon">🍽️</div><div className="meal-copy"><strong>{e.foods?.name_he||e.name||'מזון'}</strong><span>{e.quantity_g||e.grams} גרם · {round(e.protein_g??e.protein)} גרם חלבון</span></div><b>{round(e.calories??e.kcal)} קל׳</b></div>):<div className="empty card">אין עדיין רישומים.</div>}</div></main>}
+function Diary({entries,selectedDate,goals,onDateChange,onUpdate,onDelete}){
+  const [editing,setEditing]=useState(null);
+  const [grams,setGrams]=useState('');
+  const totals=entries.reduce((a,e)=>{
+    a.kcal+=Number(e.calories??e.kcal??0);
+    a.protein+=Number(e.protein_g??e.protein??0);
+    a.carbs+=Number(e.carbs_g??e.carbs??0);
+    a.fat+=Number(e.fat_g??e.fat??0);
+    return a;
+  },emptyNutrition());
+  const calorieGoal=Math.max(1,Number(goals?.calories)||1);
+  const proteinGoal=Math.max(1,Number(goals?.protein)||1);
+  const caloriePercent=Math.round(totals.kcal/calorieGoal*100);
+  const proteinPercent=Math.round(totals.protein/proteinGoal*100);
+  return <main>
+    <div className="intro"><span className="muted">היומן</span><h2>יומן אכילה</h2><label className="diary-date">בחירת תאריך<input type="date" value={selectedDate} max={todayKey()} onChange={e=>{onDateChange(e.target.value);setEditing(null)}}/></label></div>
+    <section className="card diary-summary">
+      <div className="diary-summary-head"><strong>סיכום יומי</strong><span>{entries.length} פריטים</span></div>
+      <div className="diary-summary-main"><strong>{round(totals.kcal)}</strong><span>מתוך {round(calorieGoal)} קלוריות</span></div>
+      <div className="diary-progress"><i style={{width:Math.min(100,caloriePercent)+'%'}}/></div>
+      <div className="diary-goal-note">{caloriePercent>100?'חרגת ב־'+round(totals.kcal-calorieGoal)+' קלוריות':'נותרו '+round(Math.max(0,calorieGoal-totals.kcal))+' קלוריות'}</div>
+      <div className="diary-protein-row"><span>חלבון</span><strong>{round(totals.protein)} / {round(proteinGoal)} גרם</strong></div>
+      <div className="diary-progress protein"><i style={{width:Math.min(100,proteinPercent)+'%'}}/></div>
+      <div className="diary-macros"><div><span>פחמימות</span><strong>{round(totals.carbs)}g</strong></div><div><span>שומן</span><strong>{round(totals.fat)}g</strong></div></div>
+    </section>
+    <div className="section-title"><h2>מה אכלתי?</h2><span>{entries.length} פריטים</span></div>
+    <div className="stack">{entries.length?entries.map(e=><div className="card diary-entry" key={e.id}><div className="entry"><div className="meal-icon">🍽️</div><div className="meal-copy"><strong>{e.foods?.name_he||e.name||'מזון'}</strong><span>{new Date(e.eaten_at).toLocaleTimeString('he-IL',{hour:'2-digit',minute:'2-digit'})} · {e.quantity_g||e.grams} גרם · {round(e.protein_g??e.protein)} גרם חלבון</span></div><b>{round(e.calories??e.kcal)} קל׳</b></div>{editing===e.id?<div className="diary-edit"><label>כמות בגרמים<input type="number" min="1" step="1" value={grams} onChange={x=>setGrams(x.target.value)}/></label><div className="diary-actions"><button className="primary" onClick={()=>{onUpdate(e.id,grams);setEditing(null)}}>שמירה</button><button className="secondary" onClick={()=>setEditing(null)}>ביטול</button></div></div>:<div className="diary-actions"><button className="secondary" onClick={()=>{setEditing(e.id);setGrams(String(e.quantity_g||e.grams||''))}}>עריכה</button><button className="secondary" onClick={()=>{if(window.confirm('למחוק את הרישום הזה מהיומן?'))onDelete(e.id)}}>מחיקה</button></div>}</div>):<div className="empty card">אין רישומים בתאריך הזה.</div>}</div>
+  </main>
+}
 
 function Progress({weight,history}){return <main><div className="intro"><span className="muted">התקדמות</span><h2>ההתקדמות שלי</h2><p>המשקלים נשמרים עכשיו במסד הנתונים שלך.</p></div><div className="card progress-card"><span className="muted">משקל אחרון</span><strong>{weight?weight+' ק״ג':'—'}</strong><div className="fake-chart">{history.slice(0,6).reverse().map((x,i)=><i style={{height:Math.max(20,Math.min(100,Number(x.weight_kg)||20))+'%'}} key={i}/>)}</div></div></main>}
 
-function Settings({connected}){return <main><div className="intro"><span className="muted">הגדרות</span><h2>הגדרות</h2><p>{connected?'הנתונים שלך נשמרים ב-Supabase.':'מצב מקומי — הגדירי Supabase כדי לסנכרן נתונים.'}</p></div>{['יעד קלורי','יעד חלבון','משקל יעד','התראות'].map(x=><div className="setting card" key={x}><span>{x}</span><b>›</b></div>)}</main>}
+function Settings({connected,user,cloudEnabled,onLinkGoogle,goals,onSaveGoals}){const linked=Boolean(user&&!user.is_anonymous);const [calories,setCalories]=useState(String(goals.calories));const [protein,setProtein]=useState(String(goals.protein));const [targetWeight,setTargetWeight]=useState(goals.targetWeight===''?'':String(goals.targetWeight));useEffect(()=>{setCalories(String(goals.calories));setProtein(String(goals.protein));setTargetWeight(goals.targetWeight===''?'':String(goals.targetWeight));},[goals]);return <main><div className="intro"><span className="muted">הגדרות</span><h2>הגדרות</h2><p>{connected?'הנתונים שלך מסונכרנים לענן.':'הנתונים נשמרים במכשיר הזה בלבד. חיפוש מזון דורש חיבור לאינטרנט.'}</p></div><section className="card" style={{padding:16,marginBottom:12}}><strong>גיבוי ושחזור</strong><p className="muted">{linked?'החשבון שלך מקושר וניתן לשחזר את הנתונים באמצעות Google.':connected?'הנתונים מסונכרנים לענן, אך עדיין משויכים למשתמש אנונימי במכשיר הזה.':'התחברי כדי לגבות ולשחזר נתונים בין מכשירים.'}</p>{cloudEnabled&&!linked&&<button className="primary full" onClick={onLinkGoogle}>התחברות וקישור באמצעות Google</button>}{linked&&<div className="muted">✓ חשבון Google מקושר</div>}</section><section className="card goals-card"><h3>היעדים שלי</h3><p>הגדירי יעדים אישיים. הם יישמרו בחשבון ויסתנכרנו בין המכשירים.</p><label>יעד קלורי יומי (קלוריות)<input type="number" inputMode="numeric" min="500" max="10000" value={calories} onChange={e=>setCalories(e.target.value)}/></label><label>יעד חלבון יומי (גרם)<input type="number" inputMode="decimal" min="0" max="500" step="1" value={protein} onChange={e=>setProtein(e.target.value)}/></label><label>משקל יעד (ק״ג)<input type="number" inputMode="decimal" min="20" max="500" step="0.1" placeholder="לא חובה" value={targetWeight} onChange={e=>setTargetWeight(e.target.value)}/></label><button className="primary full" onClick={()=>onSaveGoals({calories,protein,targetWeight})}>שמירת יעדים</button></section></main>}
 
 function RecipeModal({foods,onClose,onSave}){const [name,setName]=useState('');const [finalWeight,setFinalWeight]=useState('');const [ingredients,setIngredients]=useState([]);const [foodId,setFoodId]=useState(foods[0]?.id);const [grams,setGrams]=useState('100');const total=calcRecipe({ingredients});const per=finalWeight?Object.fromEntries(nutrientKeys.map(k=>[k,total[k]/Number(finalWeight)*100])):null;return <Modal title="מתכון חדש" onClose={onClose}><label>שם המתכון<input value={name} onChange={e=>setName(e.target.value)} placeholder="למשל: פשטידת קישואים"/></label><div className="ingredient-add"><select value={foodId} onChange={e=>setFoodId(e.target.value)}>{foods.map(f=><option key={f.id} value={f.id}>{f.name}</option>)}</select><input inputMode="decimal" value={grams} onChange={e=>setGrams(e.target.value)} placeholder="גרם"/><button className="secondary" onClick={()=>{const food=foods.find(f=>f.id===foodId);if(food)setIngredients([...ingredients,{food,grams:Number(grams)||0}])}}>הוסף</button></div><div className="ingredient-list">{ingredients.map((i,idx)=><div key={idx}><span>{i.food.name}</span><b>{i.grams}g</b></div>)}</div><div className="calc-box"><b>סה״כ המתכון</b><span>{round(total.kcal)} קל׳ · {round(total.protein)}g חלבון</span></div><label>משקל סופי אחרי הכנה (גרם)<input inputMode="decimal" value={finalWeight} onChange={e=>setFinalWeight(e.target.value)} placeholder="למשל 500"/></label>{per&&<div className="calc-box highlight"><b>ל־100 גרם</b><span>{round(per.kcal)} קל׳ · {round(per.protein)}g חלבון · {round(per.carbs)}g פחמימות · {round(per.fat)}g שומן</span></div>}<button className="primary full" disabled={!name||!ingredients.length||!Number(finalWeight)} onClick={()=>onSave({id:crypto.randomUUID(),name,finalWeight:Number(finalWeight),ingredients})}>שמור מתכון</button></Modal>}
 
