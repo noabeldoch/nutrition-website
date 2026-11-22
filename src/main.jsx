@@ -119,8 +119,11 @@ function App(){
       }
       if(!session.user.is_anonymous){ notify('חשבון Google כבר מקושר ✓'); return; }
       // This PWA may have a fresh anonymous user while Google is already
-      // linked to the user's existing account in Safari. Sign in to that
-      // existing Google account so its cloud data becomes available here.
+      // linked to the user's existing account in Safari. Sign out only this
+      // fresh local anonymous session; this does not clear IndexedDB data.
+      // Then OAuth is a sign-in flow, not an attempt to link an existing identity.
+      const {error:signOutError}=await supabase.auth.signOut({scope:'local'});
+      if(signOutError) throw signOutError;
       const {error}=await supabase.auth.signInWithOAuth({
         provider:'google',
         options:{redirectTo:window.location.origin}
